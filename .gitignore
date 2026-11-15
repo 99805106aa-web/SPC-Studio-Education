@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.streamlit/secrets.toml
+education_runtime/
+.spc_last_env_cache/
+spc_config.json
+spc_n8n_file_state.json
+API 키.txt
+logs/
+output/
+dist/
+_design_preview/
+_export_test_output/
