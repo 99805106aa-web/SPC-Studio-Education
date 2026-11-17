@@ -11,7 +11,7 @@ import warnings
 import numpy as np
 from scipy import special, stats
 
-MODEL_VERSION = '2026.11.17.2'
+MODEL_VERSION = '2026.11.17.3'
 BOOTSTRAP_SAMPLES = 999
 GOF_MAX = 2000
 SEED = 20261117
@@ -64,7 +64,8 @@ def validate_settings(config):
         raise ValueError('자연하한은 유한한 숫자여야 합니다.')
     return dict(mode=mode, family=family, chart_family=chart_family, method=method,
                 natural_lower=float(lower) if lower is not None else None,
-                confirmed_digest=str(config.get('confirmed_digest', '')))
+                confirmed_digest=str(config.get('confirmed_digest', '')),
+                performance_digest=str(config.get('performance_digest', '')))
 
 
 def normalize_settings_map(settings):
@@ -97,6 +98,17 @@ def reference_values(it):
         mask = np.asarray(it['source_indices']) < int(it['baseline_requested_count']) * int(it['n'])
         return values[mask]
     return values
+
+
+def performance_fingerprint(it, natural_lower=None):
+    values = np.asarray(it['raw_series'], dtype='<f8')
+    natural_lower = float(natural_lower) if natural_lower is not None else None
+    info = [MODEL_VERSION, int(it['n']), natural_lower, float(it['usl']), float(it['lsl'])]
+    return hashlib.sha256(values.tobytes()+json.dumps(info).encode()).hexdigest()
+
+
+def diagnosis_fingerprint(it, natural_lower=None):
+    return fingerprint(it, natural_lower)+performance_fingerprint(it, natural_lower)
 
 
 def location_reference_values(it):
@@ -219,18 +231,19 @@ def diagnose_distribution(it, natural_lower=None, *, cancel=None, progress=None,
     if it.get('preprocess_applied') or it.get('box_cox_applied'):
         raise ValueError('비정규 분석은 자동 이상치 제거·Box-Cox를 끈 뒤 원자료로 다시 분석하세요.')
     lower = validate_settings({'natural_lower': natural_lower})['natural_lower']
-    values = reference_values(it)
-    check_sample(values, int(it['n']))
+    values = np.asarray(it['series'], dtype=float)
+    check_sample(reference_values(it), int(it['n']))
     location = location_reference_values(it)
     check_location_sample(location, int(it['n']))
     candidates = _diagnose_values(values, lower, cancel=cancel, progress=progress, max_candidates=max_candidates)
     if progress is not None:
         progress('위치 관리도 분포 진단: 부분군 평균' if int(it['n']) > 1 else '위치 관리도 분포 진단: 개별값')
-    chart_candidates = (candidates if int(it['n']) == 1 else
+    chart_candidates = (candidates if np.array_equal(values, location) else
                         _diagnose_values(location, lower, cancel=cancel, progress=progress, max_candidates=max_candidates))
     eligible = [row for row in candidates if row['eligible']]
     chart_eligible = [row for row in chart_candidates if row['eligible']]
     return dict(digest=fingerprint(it, lower), candidates=candidates, chart_candidates=chart_candidates,
+                performance_digest=performance_fingerprint(it, lower),
                 recommended=eligible[0]['family'] if eligible else None,
                 chart_recommended=chart_eligible[0]['family'] if chart_eligible else None,
                 reference=it['limit_reference_label'], n=int(it['n']),
@@ -392,6 +405,8 @@ def apply_analysis(result, config):
         it['baseline_reasons'] = ['기준구간 관리이탈: 원인 조사 전 관리한계는 잠정값'] if baseline_bad else []
         it['recent_ctrl_violation'] = int(it['means'][-1] > it['ucl'] or it['means'][-1] < it['lcl']
                                            or (it['n'] > 1 and (it['ranges'][-1] > it['r_ucl'] or it['ranges'][-1] < it['r_lcl'])))
+        if cfg['performance_digest'] != performance_fingerprint(it, cfg['natural_lower']):
+            raise ValueError('전체 데이터 분포 선택·확인 필요: 성능 분포를 다시 진단·확인하세요.')
         performance_model = fit_checked(values, cfg['family'], cfg['natural_lower'])
         performance_model['fit_target'] = 'individual'
         it['distribution_model'] = performance_model

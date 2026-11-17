@@ -130,14 +130,16 @@ def _report_fmt_ppm_int(v) -> str:
     return fmt_ppm(v)
 
 
-def _report_metric_cls(v) -> str:
+def _report_metric_cls(v, it=None) -> str:
     try:
         fv = float(v)
         if not np.isfinite(fv):
             return "na"
-        if fv < 1.00:
+        from spc_policy import limits
+        warning, required = limits(it)
+        if fv < warning:
             return "bad"
-        if fv < 1.33:
+        if fv < required:
             return "warn"
         return "good"
     except Exception:
@@ -152,7 +154,7 @@ def _report_summary_spec(summary_df: pd.DataFrame):
     return df, cap_cols, ppm_cols, cnt_cols
 
 
-def _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols) -> Tuple[str, str]:
+def _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols, it=None) -> Tuple[str, str]:
     if val is None or (isinstance(val, float) and not np.isfinite(val)):
         return "—", "na"
     sval = str(val)
@@ -160,7 +162,7 @@ def _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols) -> Tuple[str, s
     try:
         fv = float(str(val).replace(",", ""))
         if col in cap_cols:
-            cls = _report_metric_cls(fv)
+            cls = _report_metric_cls(fv, it)
         elif col in ppm_cols:
             sval = _report_fmt_ppm_int(fv)
             if fv > 50000:
@@ -211,18 +213,18 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
     ppk = it.get("ppk", np.nan)
     metric_items = [
         ("N", _report_fmt_value(len(it.get("series", [])), 0), ""),
-        ("Cpk", _report_fmt_value(cpk) if not np.isnan(cpk) else str(it.get("capability_status", "재분석 필요")), _report_metric_cls(cpk)),
+        ("Cpk", _report_fmt_value(cpk) if not np.isnan(cpk) else str(it.get("capability_status", "재분석 필요")), _report_metric_cls(cpk, it)),
         ("PPM(Cwk, 진단용)", _report_fmt_ppm_int(it.get("ppm_within", np.nan)), ""),
         ("Ppk (모델 참고)", _report_fmt_value(ppk), ""),
         ("PPM(Ppk, 모델 참고)", _report_fmt_ppm_int(it.get("ppm_ppk", np.nan)), ""),
-        ("Cpm", _report_fmt_value(it.get("cpm", np.nan)), _report_metric_cls(it.get("cpm", np.nan))),
-        ("Cpmk", _report_fmt_value(it.get("cpmk", np.nan)), _report_metric_cls(it.get("cpmk", np.nan))),
+        ("Cpm", _report_fmt_value(it.get("cpm", np.nan)), _report_metric_cls(it.get("cpm", np.nan), it)),
+        ("Cpmk", _report_fmt_value(it.get("cpmk", np.nan)), _report_metric_cls(it.get("cpmk", np.nan), it)),
         ("Cw (진단용)", _report_fmt_value(it.get("cw", np.nan)), ""),
         ("Cwk (진단용)", _report_fmt_value(it.get("cwk", np.nan)), ""),
         ("규격 이탈", f"{spec_v:,}", "bad" if spec_v > 0 else "good"),
         ("관리 이탈", f"{ctrl_v:,}", "bad" if ctrl_v > 0 else "good"),
-        ("USL", _report_fmt_value(it.get("usl", np.nan)), ""),
-        ("LSL", _report_fmt_value(it.get("lsl", np.nan)), ""),
+        ("USL (원단위)" if it.get('box_cox_applied') else "USL", _report_fmt_value(it.get("original_usl" if it.get('box_cox_applied') else "usl", np.nan)), ""),
+        ("LSL (원단위)" if it.get('box_cox_applied') else "LSL", _report_fmt_value(it.get("original_lsl" if it.get('box_cox_applied') else "lsl", np.nan)), ""),
         ("목표치(T)", _report_fmt_value(it.get("target", np.nan)), ""),
         (f"{x_lab}-UCL", _report_fmt_value(it.get("ucl", np.nan)), ""),
         (f"{x_lab}-LCL", _report_fmt_value(it.get("lcl", np.nan)), ""),
@@ -232,6 +234,15 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
         metric_items.append((f"{disp_kind_raw}-LCL", _report_fmt_value(it.get("r_lcl", np.nan)), ""))
 
     performance_note = str(it.get('performance_note', '이전 결과: 재분석 필요'))
+    performance_note += ' · ' + it.get('study_conclusion', '')
+    cfg = it.get('assessment_settings', {})
+    performance_note += f" · 고객 요구 {cfg.get('required_limit', 1.33):.2f} / 개선 경계 {cfg.get('warning_limit', 1.):.2f}"
+    if it.get('capability_confidence'):
+        ci = it['capability_confidence']
+        performance_note += f" · Ppk 단측 {ci['confidence']:.1%} 신뢰하한 {ci['ppk_lower']:.4f} ({ci['method']})"
+    if it.get('box_cox_applied'):
+        metric_items = [(key+'.G' if key in ('Cpk', 'Ppk (모델 참고)') else key, value, cls)
+                        for key,value,cls in metric_items]
     if it.get('distribution_mode') == 'nonnormal':
         method = it.get('capability_method', 'G')
         metric_items = [(key + '.' + method if key in ('Cpk', 'Ppk (모델 참고)') else key, val, cls)
@@ -327,10 +338,12 @@ def export_summary_excel(
             return
         fv = float(v)
         if col_name in capability_names:
-            if fv < 1.0:
+            from spc_policy import limits
+            warning, required = limits(results[0] if results else None)
+            if fv < warning:
                 cell.fill = fill_crit
                 cell.font = font_crit
-            elif fv < 1.33:
+            elif fv < required:
                 cell.fill = fill_warn
                 cell.font = font_warn
             else:
@@ -585,7 +598,16 @@ def export_summary_excel(
         row[1].alignment = Alignment(wrap_text=True, vertical="top")
         ws_note.row_dimensions[row[0].row].height = 48
 
-    nonlinear = [it for it in results if it.get('distribution_mode') == 'nonnormal']
+    import json
+    ws_review = wb.create_sheet('평가·검토')
+    ws_review.append(['변수', '항목', '값'])
+    for it in results:
+        for key in ('assessment_settings','sequence_review','capability_confidence','study_conclusion','outlier_info',
+                    'dispersion_limit_method','capability_quantile_scale','capability_quantiles'):
+            value = it.get(key)
+            ws_review.append([str(it['column']),key,json.dumps(value,ensure_ascii=False,default=str) if isinstance(value,(dict,list)) else value])
+    _auto_width(ws_review, max_width=100)
+    nonlinear = [it for it in results if it.get('distribution_mode') == 'nonnormal' or it.get('box_cox_applied')]
     if nonlinear:
         import json
         ws_model = wb.create_sheet('분포·GZ')
@@ -631,7 +653,7 @@ def export_analysis_html(
     _df, cap_cols, ppm_cols, cnt_cols = _report_summary_spec(summary_df)
 
     def _cell_html(col, val):
-        sval, cls = _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols)
+        sval, cls = _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols, results[0] if results else None)
         if cls == "na" and sval == "—":
             return "<span class='na'>—</span>"
         esc = escape(sval)

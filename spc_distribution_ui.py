@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from spc_nonnormal import (BOOTSTRAP_SAMPLES, FAMILIES, diagnose_distribution, fingerprint,
-                           frozen_model, reference_values, location_reference_values)
+                           frozen_model, reference_values, location_reference_values, diagnosis_fingerprint)
 
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='spc-fit')
 
@@ -66,7 +66,7 @@ def render_distribution_panel(it, *, save_config=None):
                                     horizontal=True, key=f'dist_scope_{column}')
         st.caption('빠른 진단은 AICc 상위 3종부터 검증하고, 통과 후보가 없으면 다음 후보를 검증합니다. '
                    '검증은 분포마다 999회를 유지합니다. 모든 후보를 비교하려면 전체 후보 진단을 선택하세요.')
-        digest = fingerprint(it, lower)
+        digest = diagnosis_fingerprint(it, lower)
         jobs = st.session_state.setdefault('_distribution_jobs', {})
         job = jobs.get(column)
         busy = bool(job and job.get('future') is not None)
@@ -110,7 +110,7 @@ def render_distribution_panel(it, *, save_config=None):
             return
         candidates = diagnosis['candidates']
         scope_note = '빠른 진단 · AICc 순 단계 검증' if diagnosis.get('max_candidates') else '전체 후보 진단'
-        st.caption(f"적합 기준: {diagnosis['reference']} · {scope_note} · AD bootstrap {BOOTSTRAP_SAMPLES}회 · 유의수준 0.05 · 검증 통과 후보 중 AICc 순 추천")
+        st.caption(f"위치 기준: {diagnosis['reference']} / 성능 기준: 전체 분석 데이터 · {scope_note} · AD bootstrap {BOOTSTRAP_SAMPLES}회 · 유의수준 0.05 · 검증 통과 후보 중 AICc 순 추천")
         st.markdown('**능력·성능용 분포 · 개별 측정값**')
         st.dataframe(pd.DataFrame([
             dict(분포=r['name'], 검증=r.get('validation_status', '검증 완료' if 'pvalue' in r else '검증 불가'),
@@ -126,7 +126,7 @@ def render_distribution_panel(it, *, save_config=None):
         family = st.selectbox('개별 측정값 분포 (능력·성능)', available, format_func=FAMILIES.get, key=f'dist_family_{column}')
         chosen = next(r for r in candidates if r['family'] == family)
         import matplotlib.pyplot as plt
-        fig = preview_figure(reference_values(it), chosen)
+        fig = preview_figure(it['series'], chosen)
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
         st.markdown('**위치 관리도용 분포 · 부분군 평균**' if it['n'] > 1 else '**위치 관리도용 분포 · 개별값**')
@@ -154,7 +154,7 @@ def render_distribution_panel(it, *, save_config=None):
         if st.button('선택 분포 적용 · Pearson/G·Z 분석', key=f'dist_apply_{column}', disabled=not checked):
             st.session_state['distribution_settings'] = {**settings, column: dict(
                 mode='nonnormal', family=family, chart_family=chart_family, method=method, natural_lower=lower,
-                confirmed_digest=diagnosis['digest'])}
+                confirmed_digest=diagnosis['digest'], performance_digest=diagnosis['performance_digest'])}
             _rerun_analysis(save_config)
 
 

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 from scipy import stats
+from spc_policy import normalize_assessment, finalize_assessment, exclusion_digest, approved_mask, band, limits
 from typing import Optional, Tuple, Dict, List, Any
 
 # ===== 관리계수 표 (n: 2~25) =====
@@ -47,7 +48,7 @@ _d2_mr = 1.128  # I-MR에서 MRbar→σ 변환
 NORMALITY_MAX = 10000
 NORMALITY_SW_CUTOFF = 50  # n<=50: Shapiro-Wilk, 초과: Anderson-Darling
 
-CALCULATION_VERSION = "2026.11.17.3"
+CALCULATION_VERSION = "2026.11.17.4"
 WITHIN_CAPABILITY_NOTICE = (
     "Cw·Cwk는 군내 변동에 기반한 공정 진단 지수입니다. "
     "이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않습니다. "
@@ -105,6 +106,7 @@ def analysis_options(state) -> Dict[str, Any]:
     options["outlier_method"] = normalize_outlier_method(state.get("outlier_method", OUTLIER_METHOD_IQR))
     options["distribution_settings"] = state.get("distribution_settings", {})
     options["manual_target_map"] = state.get("manual_target_map", {}) if state.get("manual_target_enabled", False) else None
+    options["assessment_settings"] = state.get("assessment_settings", {})
     return options
 
 
@@ -115,7 +117,8 @@ def assess_process(it: Dict[str, Any]) -> Dict[str, str]:
     if it.get("spec_violation_count", 0) > 0:
         return dict(level="high", text="🔴 원본 규격이탈 확인", action="원본 이탈 측정값과 해당 Lot를 확인하세요. 전처리 후 능력 지수가 높아도 이탈은 유지됩니다.")
     unstable = (it.get("x_ctrl_violation_count", 0) + it.get("r_ctrl_violation_count", 0) > 0
-                or any(it.get("ksq_counts", {}).values()) or it.get("baseline_status") == "부적합")
+                or any(it.get("ksq_counts", {}).values()) or it.get("baseline_status") == "부적합"
+                or it.get("sequence_review", {}).get("count", 0) > 0)
     if unstable:
         return dict(level="high", text="🔴 공정 안정성 검토 필요", action="관리이탈·규칙 위반의 발생 시점과 작업 조건을 확인하세요. 능력 지수만으로 정상 운영을 판정하지 않습니다.")
     if it.get("reliability_status") in ("검토필요", "주의"):
@@ -125,9 +128,10 @@ def assess_process(it: Dict[str, Any]) -> Dict[str, str]:
     cpk = it.get("cpk", np.nan)
     if not np.isfinite(cpk):
         return dict(level="unknown", text="⬜ 능력 판정 불가", action="규격과 유효 표본을 확인하세요.")
-    if cpk < 1:
+    warning, required = limits(it)
+    if cpk < warning:
         return dict(level="high", text="🔴 공정능력 부족", action="중심 치우침과 산포를 검토하세요. 예상 능력 부족은 실제 규격이탈 건수와 구분합니다.")
-    if cpk < 1.33:
+    if cpk < required:
         return dict(level="medium", text="🟡 공정능력 주의", action="변동과 중심 이동을 추적하고 공정별 요구 기준을 확인하세요.")
     return dict(level="low", text="🟢 관측 구간 양호", action="관측 구간에서 뚜렷한 이상 신호가 없습니다. 공정별 요구 능력 기준을 확인하고 감시를 유지하세요.")
 
@@ -690,6 +694,7 @@ def analyze_column(
     outlier_method: str = OUTLIER_METHOD_IQR,
     detail_level: str = "full",
     distribution_config: Optional[Dict[str, Any]] = None,
+    assessment_settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     단일 컬럼에 대한 SPC + 공정능력 전체 분석.
@@ -698,6 +703,7 @@ def analyze_column(
     - box_cox_transform: 관리용 모드에서는 원본 기준구간으로만 변환 추정
     - include_incomplete: 기존 호출 호환용. 불완전 부분군은 항상 분석에서 제외
     """
+    assessment_settings = normalize_assessment(assessment_settings)
     if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1:
         raise ValueError("시료 크기 n은 1 이상의 정수여야 합니다.")
     if detail_level not in ('core', 'full'):
@@ -782,6 +788,16 @@ def analyze_column(
                 if bool(out_mask[i])
             ]
             # 다열/세로형 모두 해당 부분군 전체를 제외하여 이웃 부분군과 섞이지 않게 한다.
+            outlier_info['candidate_count'] = int(np.sum(out_mask))
+            outlier_info['digest'] = exclusion_digest(raw_series, n, method_key, control_phase, baseline_requested_count)
+            approval = assessment_settings['outlier_approvals'].get(str(col))
+            accepted = approved_mask(outlier_info, approval, source_indices)
+            outlier_info['reviewed'] = bool(approval) and not outlier_info.get('approval_expired', False)
+            outlier_info['approval'] = approval
+            outlier_info['approved_indices'] = (source_indices[accepted]+1).tolist()
+            outlier_info['candidate_items'] = list(outlier_info['items'])
+            outlier_info['items'] = [item for item in outlier_info['items'] if item['index'] in outlier_info['approved_indices']]
+            out_mask = accepted
             out_mask_groups = ~complete_mask(~out_mask)
             series_all[out_mask_groups] = np.nan
             out_cnt = int(np.sum(out_mask))
@@ -940,11 +956,13 @@ def analyze_column(
             r_bar = float(np.mean(ranges_limit))
             A3_val, B3_val, B4_val, c4_val = get_s_chart_constants(n)
 
-            ucl = xbarbar + A3_val * r_bar if np.isfinite(A3_val) and np.isfinite(r_bar) else np.nan
-            lcl = xbarbar - A3_val * r_bar if np.isfinite(A3_val) and np.isfinite(r_bar) else np.nan
-            r_ucl = B4_val * r_bar if np.isfinite(r_bar) and np.isfinite(B4_val) else np.nan
-            r_lcl = B3_val * r_bar if np.isfinite(r_bar) and np.isfinite(B3_val) else np.nan
-            sigma_within = (r_bar / c4_val) if np.isfinite(r_bar) and np.isfinite(c4_val) else np.nan
+            # AIAG–VDA 9.3.3.2: RMS subgroup variance and chi-square limits.
+            sigma_within = float(np.sqrt(np.mean(ranges_limit**2)))
+            tail = .00135
+            z_limit = float(stats.norm.ppf(1-tail))
+            ucl = xbarbar + z_limit*sigma_within/np.sqrt(n)
+            lcl = xbarbar - z_limit*sigma_within/np.sqrt(n)
+            r_lcl, r_ucl = (sigma_within*np.sqrt(stats.chi2.ppf([tail,1-tail], n-1)/(n-1))).tolist()
 
             A2_plot = np.nan
             D3_val = np.nan
@@ -1025,7 +1043,7 @@ def analyze_column(
     if n == 1:
         within_notes.append("n=1은 부분군 내 산포를 정의할 수 없어 Cw·Cwk 계산 제외")
     else:
-        within_notes.append("σw 추정: " + ("s̄/c₄" if use_s_chart else "R̄/d₂"))
+        within_notes.append("σw 추정: " + ("√mean(s²)" if use_s_chart else "R̄/d₂"))
         if detail_level != "full":
             within_notes.append("상세(full) 분석에서 계산")
         elif capability_unavailable:
@@ -1325,7 +1343,12 @@ def analyze_column(
     if distribution_config['mode'] == 'nonnormal':
         from spc_nonnormal import apply_analysis
         result = apply_analysis(result, distribution_config)
-    return result
+    result['dispersion_limit_method'] = ('AIAG–VDA 9.3.3.2 · √mean(s²), χ² 정확 한계' if use_s_chart
+        else result.get('dispersion_limit_method', 'Shewhart R/MR · D3/D4 근사 한계'))
+    if box_cox_applied and not capability_unavailable and detail_level == 'full':
+        from spc_policy import boxcox_capability
+        result = boxcox_capability(result)
+    return finalize_assessment(result, assessment_settings)
 
 
 def _excel_engine(path_or_bytes, head: bytes = b'') -> str:
@@ -1521,6 +1544,7 @@ def run_full_analysis(
     selected_columns: Optional[List[str]] = None,
     progress_callback=None,
     distribution_settings: Optional[Dict[str, Any]] = None,
+    assessment_settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict], pd.DataFrame]:
     """
     전체 분석 실행.
@@ -1528,7 +1552,8 @@ def run_full_analysis(
     """
     from spc_nonnormal import MODEL_VERSION, normalize_settings_map
     distribution_settings = normalize_settings_map(distribution_settings)
-    settings = dict(distribution_settings=distribution_settings, distribution_model_version=MODEL_VERSION,
+    assessment_settings = normalize_assessment(assessment_settings)
+    settings = dict(assessment_settings=assessment_settings, distribution_settings=distribution_settings, distribution_model_version=MODEL_VERSION,
                     detail_level=detail_level, selected_columns=selected_columns, data_sheet=data_sheet, spec_sheet=spec_sheet, n=n,
                     include_incomplete=include_incomplete, data_layout_mode=data_layout_mode,
                     subgroup_columns=subgroup_columns, subgroup_var_name=subgroup_var_name,
@@ -1540,6 +1565,7 @@ def run_full_analysis(
     audit = dict(calculation_version=CALCULATION_VERSION,
                  calculation_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                  distribution_sha256=hashlib.sha256(Path(__file__).with_name('spc_nonnormal.py').read_bytes()).hexdigest(),
+                 policy_sha256=hashlib.sha256(Path(__file__).with_name('spc_policy.py').read_bytes()).hexdigest(),
                  data_sha256=_input_digest(data_bytes), spec_sha256=_input_digest(spec_bytes),
                  settings=settings, numpy_version=np.__version__, pandas_version=pd.__version__)
     import scipy
@@ -1700,6 +1726,7 @@ def run_full_analysis(
                 outlier_method=outlier_method,
                 detail_level=detail_level,
                 distribution_config=distribution_settings.get(str(col)),
+                assessment_settings=assessment_settings,
             )
             it['assessment'] = assess_process(it)
             results.append(it)
@@ -1718,6 +1745,10 @@ def run_full_analysis(
                 '위치 관리도 분포': (it.get('chart_model') or {}).get('name', ''),
                 '위치 한계 계산': it.get('chart_limit_method', ''),
                 '능력 계산법': it.get('capability_method', 'normal'),
+                '고객 요구값': assessment_settings['required_limit'],
+                '개선 경계': assessment_settings['warning_limit'],
+                '조사 결론': it.get('study_conclusion', ''),
+                '시간 패턴 검토': it.get('sequence_review', {}).get('count', 0),
                 '기준분포 상태': it.get('chart_fit_status', ''),
                 '성능분포 상태': it.get('performance_fit_status', ''),
                 **{f'{name}.{method}': fmt_value(it.get(f'{name.lower()}_{method.lower()}', np.nan))

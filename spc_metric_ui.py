@@ -73,7 +73,7 @@ def _ppm(value):
     return fmt_ppm(value)
 
 
-def _index_text(value):
+def _index_text(value, it=None):
     if value == float('inf'):
         return '∞'
     if value == -float('inf'):
@@ -81,16 +81,17 @@ def _index_text(value):
     if not _finite(value):
         return '—'
     value = float(value)
-    if any(value < boundary <= round(value, 3) for boundary in (1., 1.33)):
+    from spc_policy import limits
+    if any(value < boundary <= round(value, 3) for boundary in limits(it)):
         return repr(value)
     return fmt_value(value)
 
 
-def _index_card(label, value, help_text, context=''):
-    badge, state = _capability_badge(value)
+def _index_card(label, value, help_text, context='', it=None):
+    badge, state = _capability_badge(value, it)
     if context and _finite(value):
         badge += ' · ' + context
-    return _card(label, _index_text(value), '', badge, help_text, state)
+    return _card(label, _index_text(value, it), '', badge, help_text, state)
 
 
 def _card(label, value, subtitle, badge, help_text, state="neutral", status_value=False):
@@ -121,7 +122,9 @@ def process_metric_cards_html(it):
     performance_note = it.get('performance_note', '전체 산포의 정규모델 가정 참고값입니다.')
     within_note = it.get('within_capability_note', '재분석이 필요합니다.')
     nonnormal = it.get('distribution_mode') == 'nonnormal'
-    method = '.' + it.get('capability_method', 'G') if nonnormal else ''
+    method = '.' + it.get('capability_method', 'G') if nonnormal or it.get('box_cox_applied') else ''
+    def index_card(*args, **kwargs):
+        return _index_card(*args, it=it, **kwargs)
     kind = str(it.get('dispersion_kind', 'R'))
     stats = [
         _card('평균 μ', fmt_value(it.get('mu')), '', '', '분석 데이터의 평균입니다.'),
@@ -142,19 +145,19 @@ def process_metric_cards_html(it):
         elif not _finite(value) and value not in (float('inf'), -float('inf')):
             primary.append(_card(label+method, '—', '', '미적용', reasons or '양측 규격이 필요합니다.'))
         else:
-            primary.append(_index_card(label+method, value, '관측 구간의 적용 조건 충족 시 표시합니다. ' + performance_note))
+            primary.append(index_card(label+method, value, '관측 구간의 적용 조건 충족 시 표시합니다. ' + performance_note))
     primary.extend([
-        _index_card('Pp'+method, it.get('pp'), performance_note, '참고'),
-        _index_card('Ppk'+method, it.get('ppk'), performance_note, '참고'),
-        _index_card('Cw', it.get('cw'), within_note, '진단'),
-        _index_card('Cwk', it.get('cwk'), within_note, '진단'),
+        index_card('Pp'+method, it.get('pp'), performance_note, '참고'),
+        index_card('Ppk'+method, it.get('ppk'), performance_note, '참고'),
+        index_card('Cw', it.get('cw'), within_note, '진단'),
+        index_card('Cwk', it.get('cwk'), within_note, '진단'),
     ])
     groups.append(_group('능력 · 성능 지표', 'Cp·Cpk / Pp·Ppk: 전체 변동  ·  Cw·Cwk: 군내 진단',
                          primary, layout='primary'))
     secondary = []
     for key, label in [('cpm','Cpm'),('cpmk','Cpmk')]:
         value = it.get(key)
-        secondary.append(_index_card(label, value, within_note if nonnormal else
+        secondary.append(index_card(label, value, within_note if nonnormal else
                                      '목표치와 전체 표준편차를 사용하는 기존 목표치 반영 지수입니다.', '참고'))
     secondary.extend([
         _card('|Cwk/Ppk|', fmt_value(it.get('within_overall_ratio')), '', '',
@@ -173,11 +176,13 @@ def process_metric_cards_html(it):
 
 
 
-def _capability_badge(value):
+def _capability_badge(value, it=None):
     if not _finite(value):
         return ('모형 경계값' if value in (float('inf'), -float('inf')) else '미적용'), 'neutral'
-    if float(value) < 1:
-        return '기준미달 · < 1.00', 'bad'
-    if float(value) < 1.33:
-        return '주의 · < 1.33', 'warn'
-    return '충족 · ≥ 1.33', 'good'
+    from spc_policy import limits
+    warning, required = limits(it)
+    if float(value) < warning:
+        return f'기준미달 · < {warning:.2f}', 'bad'
+    if float(value) < required:
+        return f'주의 · < {required:.2f}', 'warn'
+    return f'충족 · ≥ {required:.2f}', 'good'

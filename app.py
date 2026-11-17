@@ -555,6 +555,7 @@ def _save_config():
         "preprocess_outliers": st.session_state.get("preprocess_outliers", False),
         "outlier_method": st.session_state.get("outlier_method", "iqr"),
         "distribution_settings": st.session_state.get("distribution_settings", {}),
+        "assessment_settings": st.session_state.get("assessment_settings", {}),
         "box_cox_transform": st.session_state.get("box_cox_transform", False),
     }
     try:
@@ -901,6 +902,20 @@ def _summary_visible_df(df):
     return df.drop(columns=drop_cols) if drop_cols else df
 
 import streamlit as st
+from spc_policy import limits as _assessment_limits
+
+
+def _required_limit():
+    return _assessment_limits({'assessment_settings': st.session_state.get('assessment_settings', {})})[1]
+
+
+def _warning_limit():
+    return _assessment_limits({'assessment_settings': st.session_state.get('assessment_settings', {})})[0]
+
+
+def _threshold_text(text):
+    from spc_policy import format_criteria
+    return format_criteria(text, _warning_limit(), _required_limit())
 import matplotlib.pyplot as plt
 from scipy import stats
 
@@ -1348,6 +1363,7 @@ def _init_state():
         'selected_columns': saved.get('selected_columns'),
         'subgroup_columns': saved.get('subgroup_columns', []),
         'distribution_settings': saved.get('distribution_settings', {}),
+        'assessment_settings': saved.get('assessment_settings', {}),
         'subgroup_var_name': saved.get('subgroup_var_name', '측정치'),
         'measurement_date_column': saved.get('measurement_date_column', ''),
         'chart_usage_mode': saved.get('chart_usage_mode', 'phase1'),
@@ -1584,8 +1600,8 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
     detail_lines = []
 
     for fav_name, results in all_results:
-        bad  = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.00]
-        warn = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and 1.00 <= it['cpk'] < 1.33]
+        bad  = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit()]
+        warn = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit()]
         svio = sum(it.get('spec_violation_count', 0) for it in results)
         cvio = sum(_get_ctrl_total(it) for it in results)
         total_bad  += len(bad)
@@ -1621,8 +1637,8 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
     lines.append("")
     lines.append("▶ 전체 요약")
     lines.append(f"  - 분석 대상 즐겨찾기 : {len(all_results)}개")
-    lines.append(f"  - Cpk < 1.00 (불량)  : {total_bad}개")
-    lines.append(f"  - Cpk < 1.33 (주의)  : {total_warn}개")
+    lines.append(_threshold_text(f"  - Cpk < 1.00 (불량)  : {total_bad}개"))
+    lines.append(_threshold_text(f"  - Cpk < 1.33 (주의)  : {total_warn}개"))
     lines.append(f"  - 규격 이탈 (누적)   : {total_spec}건")
     lines.append(f"  - 관리 이탈 (누적)   : {total_ctrl}건")
     lines.append(f"  - Cp·Cpk 검토 대상  : {total_review}개 (기준 충족/미달 집계 제외)")
@@ -1649,9 +1665,9 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
         sv  = it.get('recent_spec_violation', 0) if only_recent else it.get('spec_violation_count', 0)
         cv  = (it.get('recent_ctrl_violation', 0) if only_recent
                else _get_ctrl_total(it))
-        if np.isfinite(cpk) and cpk < 1.00:
+        if np.isfinite(cpk) and cpk < _warning_limit():
             bad.append(it)
-        elif np.isfinite(cpk) and cpk < 1.33:
+        elif np.isfinite(cpk) and cpk < _required_limit():
             warn.append(it)
         if sv > 0:
             spec_vio.append((col, sv))
@@ -1687,8 +1703,8 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
     if rule_items:
         lines.append("  KSQ 규칙 확인: " + ", ".join(str(item['column']) for item in rule_items))
     lines.append(f"  - 분석 변수 수       : {len(results)}개")
-    lines.append(f"  - Cpk < 1.00 (불량)  : {len(bad)}개")
-    lines.append(f"  - Cpk < 1.33 (주의)  : {len(warn)}개")
+    lines.append(_threshold_text(f"  - Cpk < 1.00 (불량)  : {len(bad)}개"))
+    lines.append(_threshold_text(f"  - Cpk < 1.33 (주의)  : {len(warn)}개"))
     lines.append(f"  - 규격 이탈 변수     : {len(spec_vio)}개")
     lines.append(f"  - 관리한계 이탈 변수 : {len(ctrl_vio)}개")
     lines.append(f"  - Cp·Cpk 검토 대상  : {len(review_items)}개 (기준 충족/미달 집계 제외)")
@@ -1696,7 +1712,7 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
     # 불량 변수 상세
     if bad:
         lines.append("")
-        lines.append("▶ [불량] Cpk < 1.00 — 즉시 조치 필요")
+        lines.append(_threshold_text("▶ [불량] Cpk < 1.00 — 즉시 조치 필요"))
         lines.append(f"  {'변수':<18} {'Cpk':>7} {'Ppk':>7} {'PPM(내)':>12} {'PPM(외)':>12} {'규격이탈':>8} {'관리이탈':>8}")
         lines.append("  " + "-" * 78)
         for it in bad:
@@ -1710,7 +1726,7 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
     # 주의 변수 상세
     if warn:
         lines.append("")
-        lines.append("▶ [주의] Cpk 1.00~1.33 — 모니터링 강화 필요")
+        lines.append(_threshold_text("▶ [주의] Cpk 1.00~1.33 — 모니터링 강화 필요"))
         lines.append(f"  {'변수':<18} {'Cpk':>7} {'Ppk':>7} {'PPM(내)':>12} {'PPM(외)':>12} {'규격이탈':>8} {'관리이탈':>8}")
         lines.append("  " + "-" * 78)
         for it in warn:
@@ -1758,8 +1774,8 @@ def _push_analysis_history(results: list, source: str = ""):
         'time': datetime.datetime.now().strftime("%m-%d %H:%M"),
         'source': source or st.session_state.get('_loaded_fav_name', ''),
         'n_vars': len(results),
-        'n_bad':  sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.00),
-        'n_warn': sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and 1.00 <= it['cpk'] < 1.33),
+        'n_bad':  sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit()),
+        'n_warn': sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit()),
         'n_spec': sum(it.get('spec_violation_count', 0) for it in results),
         'cpk_list': {it['column']: it.get('cpk', float('nan')) for it in results},
     }
@@ -1811,7 +1827,7 @@ def _auto_select_corr_columns(results: list, num_cols: list, limit: int = 10) ->
         spec_cnt = int(it.get("spec_violation_count", 0) or 0)
         ctrl_cnt = _get_ctrl_total(it)
         is_risky = (
-            (np.isfinite(cpk_val) and cpk_val < 1.33)
+            (np.isfinite(cpk_val) and cpk_val < _required_limit())
             or spec_cnt > 0
             or ctrl_cnt > 0
         )
@@ -1827,7 +1843,7 @@ def _auto_select_corr_columns(results: list, num_cols: list, limit: int = 10) ->
 
     risky = [x for x in candidates if x["risky"]]
     risky.sort(key=lambda x: (
-        0 if np.isfinite(x["cpk"]) and x["cpk"] < 1.00 else 1,
+        0 if np.isfinite(x["cpk"]) and x["cpk"] < _warning_limit() else 1,
         x["cpk"],
         -(x["spec"] + x["ctrl"]),
         x["order"],
@@ -1881,8 +1897,8 @@ def _push_email_history(subject: str, to_list: list, ok: bool):
 def _cpk_color(val_str: str) -> str:
     try:
         v = float(val_str)
-        if v < 1.00:   return "bad"
-        if v < 1.33:   return "warn"
+        if v < _warning_limit():   return "bad"
+        if v < _required_limit():   return "warn"
         return "good"
     except Exception:
         return "muted"
@@ -1897,8 +1913,8 @@ def _judgment_text(cpk) -> str:
     except Exception:
         return "⬜ 판정불가"
     if not np.isfinite(v): return "⬜ 판정불가"
-    if v < 1.00:  return "🔴 능력 지수 부족"
-    if v < 1.33:  return "🟡 능력 지수 주의"
+    if v < _warning_limit():  return "🔴 능력 지수 부족"
+    if v < _required_limit():  return "🟡 능력 지수 주의"
     return "능력 지수 양호 · 안정성 별도 확인"
 
 
@@ -1912,14 +1928,14 @@ def _action_guide_md(cpk) -> str:
     except Exception:
         return ""
     if not np.isfinite(v): return ""
-    if v < 1.00:
+    if v < _warning_limit():
         return (
             "**🔴 즉시 조치 필요**\n\n"
             "능력 지수가 낮습니다. 실제 규격이탈 여부는 원본 이탈 건수를 확인하세요.\n\n"
             "- **확인 항목**: 설비 마모 여부, 원자재 변경, 작업 조건 변동\n"
             "- **권장 행동**: 담당자에게 즉시 보고 후 이메일 알림 발송"
         )
-    if v < 1.33:
+    if v < _required_limit():
         return (
             "**🟡 모니터링 강화 필요**\n\n"
             "공정능력이 다소 부족합니다. 지속적인 모니터링이 필요합니다.\n\n"
@@ -2452,6 +2468,8 @@ with st.sidebar:
 
     from spc_file_ui import render_file_inputs
     render_file_inputs()
+    from spc_review_ui import render_assessment_settings
+    render_assessment_settings(_save_config)
 
     if not _bm:
         # ── 공정 정보 (선택) ──
@@ -2730,10 +2748,10 @@ with st.sidebar:
                 help="n>1은 결측 포함 부분군 전체를 제외하여 원래 묶음을 유지합니다. n=1은 유효 측정값을 사용합니다."
             )
             st.checkbox(
-                "극단적 이상치 자동 제거",
+                "이상치 후보 검출 (검토 승인 후 제외)",
                 key='preprocess_outliers',
                 on_change=_save_config,
-                help="선택한 기준 밖의 값이 포함된 부분군을 분석에서 제외합니다. 원본 불량률·규격이탈 알림에는 유지합니다. 관리용 모드는 기준구간에서 울타리를 추정합니다."
+                help="통계적 후보를 표시합니다. 변수 상세에서 사유·확인자와 함께 승인한 행의 부분군만 제외하며 원자료는 보존합니다."
             )
             if st.session_state.get('preprocess_outliers'):
                 st.radio(
@@ -2899,7 +2917,7 @@ with st.sidebar:
 
         # ── 용어 사전 ──
         with st.expander("📚 용어 사전"):
-            st.markdown("""
+            st.markdown(_threshold_text("""
     | 용어 | 쉬운 설명 |
     |------|-----------|
     | **Cp** | 전체 산포 기준 공정능력. 적용 조건 충족 시 표시 |
@@ -2934,7 +2952,7 @@ with st.sidebar:
     - `Cpmk = min((USL - μ)/(3√(σ_overall² + (μ - T)²)), (μ - LSL)/(3√(σ_overall² + (μ - T)²)))`
 
     ※ 이 앱의 Cpm/Cpmk는 요청사항에 맞춰 `σ_overall(전체 표준편차)` 기준입니다.
-    """)
+    """))
 
         # ── AI 설정 (Gemini / Groq / OpenRouter) ──
         if education_mode():
@@ -3046,7 +3064,7 @@ if run_btn or _auto_triggered:
                     _has_violation = (
                         any(assess_process(it)['level'] != 'low' for it in results)
                         or
-                        any(np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.33 for it in results)
+                        any(np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _required_limit() for it in results)
                         or any(it.get('spec_violation_count', 0) > 0 for it in results)
                     )
                     if _has_violation:
@@ -3127,8 +3145,8 @@ st.markdown("""
 # ── 상태바 (분석 완료 시) ──
 if st.session_state.get('analysis_done') and all(it.get('detail_level') != 'core' for it in st.session_state.get('results', [])):
     _r = st.session_state.get('results', [])
-    _nb  = sum(1 for it in _r if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.00)
-    _nw  = sum(1 for it in _r if np.isfinite(it.get('cpk', np.nan)) and 1.00 <= it['cpk'] < 1.33)
+    _nb  = sum(1 for it in _r if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit())
+    _nw  = sum(1 for it in _r if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit())
     _ns  = sum(it.get('spec_violation_count', 0) for it in _r)
     _hist = st.session_state.get('analysis_history', [])
     _last_t = _hist[-1]['time'] if _hist else "—"
@@ -3215,14 +3233,14 @@ if not st.session_state['analysis_done']:
             <div style="font-size:0.88rem">🔴 빨강 항목 클릭 →<br>관리도 확인 후 알림 발송</div>
         </div>""", unsafe_allow_html=True)
 
-    st.markdown("""<div style="background:rgba(34,197,94,0.10);border:1px solid rgba(34,197,94,0.3);
+    st.markdown(_threshold_text("""<div style="background:rgba(34,197,94,0.10);border:1px solid rgba(34,197,94,0.3);
         border-radius:8px;padding:12px 18px;margin:16px 0;font-size:0.9rem">
         💡 <b>능력 지수 참고 기준</b> &nbsp;|&nbsp;
         🔴 <b>능력 부족</b>: Cpk &lt; 1.00 — 개선 필요 &nbsp;|&nbsp;
         🟡 <b>주의</b>: Cpk 1.00~1.33 — 모니터링 강화 &nbsp;|&nbsp;
         🟢 <b>능력 기준 충족</b>: Cpk ≥ 1.33<br>
         종합 판정은 규격이탈·공정 안정성·분석 조건을 함께 확인하세요.
-    </div>""", unsafe_allow_html=True)
+    </div>"""), unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("""
@@ -3240,7 +3258,7 @@ if not st.session_state['analysis_done']:
 """)
 
     st.markdown("---")
-    st.markdown("""
+    st.markdown(_threshold_text("""
 ### 주요 기능
 - **Xbar-R 관리도**: n=2~9일 때 부분군 평균-범위 관리도
 - **Xbar-S 관리도**: n≥10일 때 부분군 평균-표준편차 관리도 (자동 전환)
@@ -3253,7 +3271,7 @@ if not st.session_state['analysis_done']:
 - **PDF 내보내기**: 전체 관리도/히스토그램/QQ 플롯
 - **HTML 내보내기**: 공유용 단일 리포트(요약표 + 변수별 요약 + 차트)
 - **이메일 알림**: SMTP SSL/STARTTLS 지원
-""")
+"""))
     st.stop()
 
 
@@ -3277,8 +3295,8 @@ if summary_df is not None and '오류' in summary_df.columns:
 col_names  = [it['column'] for it in results]
 n_cols     = len(results)
 control_phase_global = str(results[0].get('control_phase', 'phase1')) if results else 'phase1'
-n_cpk_bad  = sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.00)
-n_cpk_warn = sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and 1.00 <= it['cpk'] < 1.33)
+n_cpk_bad  = sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit())
+n_cpk_warn = sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit())
 n_spec_vio = sum(it.get('spec_violation_count', 0) for it in results)
 n_ctrl_vio = sum(_get_ctrl_total(it) for it in results)
 ctrl_metric_label = "관리한계 이탈 (감시구간)" if control_phase_global == 'phase2' else "관리한계 이탈 (누적)"
@@ -3292,12 +3310,12 @@ ctrl_metric_help = (
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("분석 변수 수", f"{n_cols}개",
           help="분석한 측정 항목의 총 개수입니다.")
-m2.metric("Cpk < 1.33 (주의)", f"{n_cpk_warn}개" if results[0].get('detail_level') != 'core' else '미계산',
+m2.metric(_threshold_text("Cpk < 1.33 (주의)"), f"{n_cpk_warn}개" if results[0].get('detail_level') != 'core' else '미계산',
           delta=f"-{n_cpk_warn}" if n_cpk_warn else None, delta_color="inverse",
-          help="공정능력 지수(Cpk)가 1.33 미만인 항목 수. 지속적인 모니터링이 필요합니다.")
-m3.metric("Cpk < 1.00 (불량)", f"{n_cpk_bad}개" if results[0].get('detail_level') != 'core' else '미계산',
+          help=_threshold_text("공정능력 지수(Cpk)가 1.33 미만인 항목 수. 지속적인 모니터링이 필요합니다."))
+m3.metric(_threshold_text("Cpk < 1.00 (불량)"), f"{n_cpk_bad}개" if results[0].get('detail_level') != 'core' else '미계산',
           delta=f"-{n_cpk_bad}" if n_cpk_bad else None, delta_color="inverse",
-          help="공정능력 지수(Cpk)가 1.00 미만인 항목 수. 규격 이탈이 발생할 수 있어 즉시 조치가 필요합니다.")
+          help=_threshold_text("공정능력 지수(Cpk)가 1.00 미만인 항목 수. 규격 이탈이 발생할 수 있어 즉시 조치가 필요합니다."))
 m4.metric("규격 이탈 (누적)", f"{n_spec_vio}건",
           help="고객·도면 규격(USL/LSL)을 벗어난 데이터의 총 누적 건수입니다.")
 m5.metric(ctrl_metric_label, f"{n_ctrl_vio}건", help=ctrl_metric_help)
@@ -3309,12 +3327,12 @@ st.caption(WITHIN_CAPABILITY_NOTICE)
 st.caption(f"Cp·Cpk 적용 조건 미충족/계산불가: {sum(it.get('capability_status') != '적용 가능' for it in results)}개 · 기준 충족/미달 집계에서 제외")
 if st.session_state.get('beginner_mode'):
     st.info(
-        "🔰 **초보자 모드 활성화 중** — 지표 이름이 쉬운 표현으로 표시되고, "
+        _threshold_text("🔰 **초보자 모드 활성화 중** — 지표 이름이 쉬운 표현으로 표시되고, "
         "차트 읽는 법과 권장 행동 가이드가 자동으로 펼쳐집니다.  \n"
         "능력 지수 참고 기준: 🔴 **능력 부족** Cpk < 1.00 개선 필요 &nbsp;|&nbsp; "
         "🟡 **주의** Cpk 1.00~1.33 모니터링 &nbsp;|&nbsp; "
         "🟢 **능력 기준 충족** Cpk ≥ 1.33. "
-        "종합 판정은 규격이탈·공정 안정성·분석 조건을 함께 확인하세요."
+        "종합 판정은 규격이탈·공정 안정성·분석 조건을 함께 확인하세요.")
     )
 
 if control_phase_global == 'phase2':
@@ -3332,10 +3350,10 @@ def _highlight_row(df_row):
                 v = float(df_row[cn])
                 if np.isfinite(v): worst = min(worst, v)
             except Exception: pass
-    if worst < 1.00:
+    if worst < _warning_limit():
         row_bg    = 'background-color: rgba(220, 38, 38, 0.18)'
         cpk_style = 'background-color: rgba(220,38,38,0.55); color:#ff9999; font-weight:bold'
-    elif worst < 1.33:
+    elif worst < _required_limit():
         row_bg    = 'background-color: rgba(217, 119, 6, 0.18)'
         cpk_style = 'background-color: rgba(217,119,6,0.55); color:#ffe066; font-weight:bold'
     else:
@@ -3604,7 +3622,7 @@ with tab_summ:
             fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
             _flt = st.session_state.get('summary_filter', 'all')
             if fc1.button("전체 보기",        type="primary" if _flt=='all'  else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'all';  st.rerun()
-            if fc2.button("불량 (Cpk<1.00)", type="primary" if _flt=='bad'  else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'bad';  st.rerun()
+            if fc2.button(_threshold_text("불량 (Cpk<1.00)"), type="primary" if _flt=='bad'  else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'bad';  st.rerun()
             if fc3.button("주의 이상",        type="primary" if _flt=='warn' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'warn'; st.rerun()
             if fc4.button("규격 이탈",        type="primary" if _flt=='spec' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'spec'; st.rerun()
             if fc5.button("관리 이탈",        type="primary" if _flt=='ctrl' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'ctrl'; st.rerun()
@@ -3617,11 +3635,11 @@ with tab_summ:
             _flt = st.session_state.get('summary_filter', 'all')
             show_results = results
             if _flt == 'bad':
-                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.00]
+                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit()]
             elif _flt == 'warn':
-                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.33]
+                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _required_limit()]
             elif _flt == 'good':
-                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] >= 1.33]
+                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] >= _required_limit()]
             elif _flt == 'spec':
                 show_results = [it for it in results if it.get('spec_violation_count', 0) > 0]
             elif _flt == 'ctrl':
@@ -3699,7 +3717,7 @@ with tab_stab:
         st.caption("전체 성능 참고값과 군내·전체 변동 차이를 함께 확인합니다. 공정 안정성은 관리도 결과와 함께 판단하세요.")
         limit_col, ratio_col, view_col = st.columns([1, 1, 2])
         with limit_col:
-            stab_ppk = st.number_input("Ppk 충족 기준", min_value=0.1, value=1.33,
+            stab_ppk = st.number_input("Ppk 충족 기준", min_value=0.1, value=_required_limit(),
                                        step=0.01, key="stab_ppk_limit")
         with ratio_col:
             stab_ratio = st.number_input("변동 비율 구분 기준", min_value=1.01, value=1.25,
@@ -3710,7 +3728,7 @@ with tab_stab:
         opt1, opt2 = st.columns(2)
         stab_labels = opt1.checkbox("항목명 표시", value=False, key="stab_labels")
         stab_contour = opt2.checkbox("Cwk = 1 등고선 표시", value=False, key="stab_contour")
-        st.caption("기본 구분값: Ppk 1.33 / 비율 1.25 · 사내·고객 기준에 맞게 조정하세요. 비율 기준은 안정성 검정의 임계값이 아닙니다.")
+        st.caption(_threshold_text("기본 구분값: Ppk 1.33 / 비율 1.25 · 사내·고객 기준에 맞게 조정하세요. 비율 기준은 안정성 검정의 임계값이 아닙니다."))
         try:
             stab_rows = stability_assessment(results, stab_ppk, stab_ratio)
             m1, m2, m3, m4 = st.columns(4)
@@ -3894,6 +3912,8 @@ with tab_ctrl:
         if it.get('distribution_mode') == 'nonnormal':
             _r_lcl_applicable = _n_subgroup > 1
         st.markdown(process_metric_cards_html(it), unsafe_allow_html=True)
+        from spc_review_ui import render_result_review
+        render_result_review(it, _save_config)
         render_distribution_panel(it, save_config=_save_config)
         with st.expander("계산 기준·분석 조건 안내", expanded=False):
             st.caption(WITHIN_CAPABILITY_NOTICE)
@@ -4235,9 +4255,9 @@ with tab_ctrl:
                     fv = float(v)
                     if not np.isfinite(fv):
                         return "muted"
-                    if fv < 1.00:
+                    if fv < _warning_limit():
                         return "bad"
-                    if fv < 1.33:
+                    if fv < _required_limit():
                         return "warn"
                     return "good"
                 except Exception:
@@ -4306,8 +4326,8 @@ with tab_ctrl:
             _ppk_cls = _cp_level(it.get('ppk', np.nan))
             _cpmk_cls = _cp_level(it.get('cpmk', np.nan))
             _spec_rows = [
-                ("USL", _num(it.get('usl', np.nan)), "muted"),
-                ("LSL", _num(it.get('lsl', np.nan)), "muted"),
+                ("USL (원단위)" if it.get('box_cox_applied') else "USL", _num(it.get('original_usl' if it.get('box_cox_applied') else 'usl', np.nan)), "muted"),
+                ("LSL (원단위)" if it.get('box_cox_applied') else "LSL", _num(it.get('original_lsl' if it.get('box_cox_applied') else 'lsl', np.nan)), "muted"),
                 ("목표치(T)", _num(it.get('target', np.nan)), "muted"),
                 ("운영 모드", str(it.get('control_phase_label', '해석용')), "muted"),
                 ("Cp / Cpk", f"{_num(it.get('cp', np.nan))} / {_num(it.get('cpk', np.nan))}", _cpk_cls),

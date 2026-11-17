@@ -52,9 +52,11 @@ def _risk_level(context: Dict[str, Any]) -> str:
 
     if spec > 0 or ctrl > 0 or t1 > 0:
         return "high"
-    if np.isfinite(cpk) and cpk < 1.00:
+    from spc_policy import limits
+    warning, required = limits(context)
+    if np.isfinite(cpk) and cpk < warning:
         return "high"
-    if np.isfinite(cpk) and cpk < 1.33:
+    if np.isfinite(cpk) and cpk < required:
         return "medium"
     return "low"
 
@@ -103,6 +105,9 @@ def build_var_context(it: Dict[str, Any], beginner_mode: bool) -> Dict[str, Any]
         "chart_limit_method": it.get('chart_limit_method'),
         "dispersion_limit_method": it.get('dispersion_limit_method'),
         "capability_method": it.get('capability_method', 'normal'),
+        "assessment_settings": it.get('assessment_settings', {}),
+        "sequence_review": it.get('sequence_review', {}),
+        "study_conclusion": it.get('study_conclusion', ''),
         "capability_methods": it.get('capability_methods', {}),
         "pearson_rules_note": it.get('pearson_rules_note', ''),
         "pp": _to_float(it.get("pp")),
@@ -613,8 +618,12 @@ def _fallback_chat_response(query: str, full_summary: str, reason: str = "") -> 
 
     cpk_items = [x for x in enriched if np.isfinite(x["cpk"])]
     worst = sorted(cpk_items, key=lambda x: x["cpk"])[:5]
-    bad = [x for x in cpk_items if x["cpk"] < 1.0]
-    warn = [x for x in cpk_items if 1.0 <= x["cpk"] < 1.33]
+    required = _numeric_from_summary(records[0].get('고객 요구값')) if records else 1.33
+    warning = _numeric_from_summary(records[0].get('개선 경계')) if records else 1.
+    required = required if np.isfinite(required) else 1.33
+    warning = warning if np.isfinite(warning) else 1.
+    bad = [x for x in cpk_items if x["cpk"] < warning]
+    warn = [x for x in cpk_items if warning <= x["cpk"] < required]
     spec_bad = [x for x in enriched if x["spec"] > 0]
     ctrl_bad = [x for x in enriched if x["ctrl"] > 0]
 
@@ -622,8 +631,8 @@ def _fallback_chat_response(query: str, full_summary: str, reason: str = "") -> 
         "외부 AI 호출 없이 앱 내부 요약값으로 답변합니다.",
         "",
         f"- 전체 변수: {len(records)}개",
-        f"- Cpk < 1.00: {len(bad)}개",
-        f"- Cpk 1.00~1.33: {len(warn)}개",
+        f"- Cpk < {warning:.2f}: {len(bad)}개",
+        f"- Cpk {warning:.2f}~{required:.2f}: {len(warn)}개",
         f"- 규격 이탈 발생: {len(spec_bad)}개",
         f"- 관리한계 이탈 발생: {len(ctrl_bad)}개",
     ]
