@@ -1,4 +1,6 @@
-﻿# SPC Studio 교육용 공유 · MSA와 동일한 사용일 방식
+# SPC Studio 교육용 공유 · MSA와 동일한 사용일 방식
+
+Pearson 계산 버전 `2026.11.17.3`: AIAG–VDA 9.3.5.2에 따라 위치 관리도는 부분군 평균(n=1은 개별값)의 적합 분포에서 0.135%/99.865% 분위수 한계를 계산합니다. 능력·성능용 개별값 분포와 위치 분포를 각각 진단·선택합니다. 산포는 Shewhart R/S를 사용합니다. 이전 결과는 분포 진단·선택·확인 후 다시 분석하세요.
 
 교육생은 공개 URL을 Chrome 또는 Edge로 엽니다. 지정된 교육일에는 회원가입·로그인·사용자 비밀번호 입력 없이 예제·분석·보고서를 사용할 수 있습니다.
 
@@ -17,7 +19,7 @@
 
 ## Streamlit Community Cloud 배포
 
-1. `python tools/build_education_bundle.py`로 `dist/SPC_교육용_배포.zip`을 만듭니다.
+1. `python 보관자료/tools/build_education_bundle.py`로 `보관자료/dist/SPC_교육용_배포.zip`을 만듭니다.
 2. ZIP을 풀고 내용물만 교육 전용 GitHub 저장소에 업로드합니다.
 3. Streamlit Community Cloud에서 저장소·브랜치를 선택합니다.
 4. Main file path는 **education_app.py**, Python은 **3.12**를 선택합니다.

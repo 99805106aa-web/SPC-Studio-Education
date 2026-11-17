@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 spc_export.py
 =============
@@ -239,7 +239,10 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
         model = it.get('distribution_model') or it.get('chart_model') or {}
         params_text = ', '.join(f'{value:.6g}' for value in model.get('params', []))
         model_note = f"분포 {model.get('name', '미확인')} · 모수 [{params_text}] · 적합 N {model.get('fit_n', '—')} / 검정 N {model.get('test_n', '—')} · AD p={model.get('pvalue', '—')}"
-        model_note += f" · 기준 {it.get('limit_reference_label')} · 한계 모의 {it.get('simulation_samples', 0):,} / seed {it.get('seed', '—')} · 자연하한 {(it.get('distribution_settings') or {}).get('natural_lower')}"
+        chart_model = it.get('chart_model') or {}
+        model_note += (f" · 위치 분포 {chart_model.get('name', '미확인')} · 위치 적합 N {chart_model.get('fit_n', '—')}"
+                       f" · 기준 {it.get('limit_reference_label')} · {it.get('chart_limit_method', '위치 분포 확인 필요')}"
+                       f" · {it.get('dispersion_limit_method', '')} · 자연하한 {(it.get('distribution_settings') or {}).get('natural_lower')}")
         comparisons = ' / '.join(f"{m}: Cp={_report_fmt_value(v['cp'])}, Cpk={_report_fmt_value(v['cpk'])}, Pp={_report_fmt_value(v['pp'])}, Ppk={_report_fmt_value(v['ppk'])}"
                                  for m, v in it.get('capability_methods', {}).items())
         performance_note += ' ' + model_note + ' · ' + comparisons + ' · ' + it.get('pearson_rules_note', '')
@@ -590,7 +593,8 @@ def export_summary_excel(
         for it in nonlinear:
             keys = ('capability_method', 'distribution_settings', 'chart_model', 'distribution_model',
                     'chart_fit_status', 'performance_fit_status', 'capability_methods', 'capability_quantiles',
-                    'numeric_status', 'effective_rules', 'pearson_rules_note', 'simulation_samples', 'seed')
+                    'numeric_status', 'effective_rules', 'pearson_rules_note', 'chart_fit_target',
+                    'chart_limit_method', 'dispersion_limit_method', 'simulation_samples', 'seed')
             for key in keys:
                 value = it.get(key)
                 ws_model.append([str(it['column']), key,

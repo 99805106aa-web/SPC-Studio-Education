@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 spc_ai.py
 =========
@@ -100,6 +100,8 @@ def build_var_context(it: Dict[str, Any], beginner_mode: bool) -> Dict[str, Any]
         "distribution_mode": it.get('distribution_mode', 'normal'),
         "distribution_model": it.get('distribution_model'),
         "chart_model": it.get('chart_model'),
+        "chart_limit_method": it.get('chart_limit_method'),
+        "dispersion_limit_method": it.get('dispersion_limit_method'),
         "capability_method": it.get('capability_method', 'normal'),
         "capability_methods": it.get('capability_methods', {}),
         "pearson_rules_note": it.get('pearson_rules_note', ''),

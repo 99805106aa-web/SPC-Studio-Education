@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 spc_core.py
 ===========
@@ -47,7 +47,7 @@ _d2_mr = 1.128  # I-MR에서 MRbar→σ 변환
 NORMALITY_MAX = 10000
 NORMALITY_SW_CUTOFF = 50  # n<=50: Shapiro-Wilk, 초과: Anderson-Darling
 
-CALCULATION_VERSION = "2026.11.17.2"
+CALCULATION_VERSION = "2026.11.17.3"
 WITHIN_CAPABILITY_NOTICE = (
     "Cw·Cwk는 군내 변동에 기반한 공정 진단 지수입니다. "
     "이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않습니다. "
@@ -1715,6 +1715,8 @@ def run_full_analysis(
                 '관리도': it.get('chart_mode', ''),
                 '분포 모드': it.get('distribution_mode', 'normal'),
                 '적용 분포': (it.get('distribution_model') or it.get('chart_model') or {}).get('name', '정규' if it.get('distribution_mode') != 'nonnormal' else '미확인'),
+                '위치 관리도 분포': (it.get('chart_model') or {}).get('name', ''),
+                '위치 한계 계산': it.get('chart_limit_method', ''),
                 '능력 계산법': it.get('capability_method', 'normal'),
                 '기준분포 상태': it.get('chart_fit_status', ''),
                 '성능분포 상태': it.get('performance_fit_status', ''),

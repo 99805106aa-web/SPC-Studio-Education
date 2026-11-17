@@ -11,12 +11,12 @@ import warnings
 import numpy as np
 from scipy import special, stats
 
-MODEL_VERSION = '2026.11.17.1'
+MODEL_VERSION = '2026.11.17.2'
 BOOTSTRAP_SAMPLES = 999
 GOF_MAX = 2000
-SIMULATION_SAMPLES = 1_000_000
 SEED = 20261117
 ALPHA = float(stats.norm.cdf(-3))
+CHART_TAIL = .00135  # AIAG–VDA 9.3.5.2: 0.135% and 99.865%.
 FAMILIES = {
     'norm': '정규', 'pearson3': 'Pearson III', 'lognorm': '로그정규',
     'gamma': '감마', 'weibull_min': 'Weibull', 'expon': '지수',
@@ -24,7 +24,6 @@ FAMILIES = {
 }
 POSITIVE = set(FAMILIES) - {'norm', 'pearson3'}
 _fit_cache = OrderedDict()
-_limit_cache = OrderedDict()
 _lock = threading.Lock()
 
 
@@ -54,13 +53,16 @@ def validate_settings(config):
     family = config.get('family')
     if family is not None and family not in FAMILIES:
         raise ValueError('지원하지 않는 분포입니다.')
+    chart_family = config.get('chart_family', family)
+    if chart_family is not None and chart_family not in FAMILIES:
+        raise ValueError('지원하지 않는 위치 관리도 분포입니다.')
     method = config.get('method', 'G')
     if method not in ('G', 'Z'):
         raise ValueError('계산 방법은 G 또는 Z여야 합니다.')
     lower = config.get('natural_lower')
     if lower is not None and (isinstance(lower, bool) or not np.isfinite(float(lower))):
         raise ValueError('자연하한은 유한한 숫자여야 합니다.')
-    return dict(mode=mode, family=family, method=method,
+    return dict(mode=mode, family=family, chart_family=chart_family, method=method,
                 natural_lower=float(lower) if lower is not None else None,
                 confirmed_digest=str(config.get('confirmed_digest', '')))
 
@@ -97,6 +99,18 @@ def reference_values(it):
     return values
 
 
+def location_reference_values(it):
+    """Fit the plotted statistic, keeping original subgroup/baseline boundaries."""
+    values = reference_values(it)
+    return values if int(it['n']) == 1 else values.reshape(-1, int(it['n'])).mean(axis=1)
+
+
+def check_location_sample(values, n):
+    minimum = 50 if n == 1 else 20
+    if len(values) < minimum or not np.isfinite(values).all() or np.ptp(values) <= 0:
+        raise ValueError(f'위치 관리도 분포 적합에는 유효 {"개별값 50" if n == 1 else "부분군 평균 20"}개 이상과 양의 산포가 필요합니다.')
+
+
 def check_sample(values, n):
     if len(values) < 50:
         raise ValueError('비정규 적합에는 유효 측정값 50개 이상이 필요합니다.')
@@ -116,7 +130,7 @@ def _estimate_params(family, values, lower):
     kwargs = {'floc': lower} if lower is not None else {}
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        params = ((float(np.mean(values)), float(np.std(values, ddof=1)))
+        params = ((float(np.mean(values)), float(np.std(values, ddof=0)))
                   if family == 'norm' else tuple(float(x) for x in dist.fit(values, **kwargs)))
     if not np.isfinite(params).all() or params[-1] <= 0:
         raise ValueError('유효한 분포 모수를 추정하지 못했습니다.')
@@ -207,6 +221,24 @@ def diagnose_distribution(it, natural_lower=None, *, cancel=None, progress=None,
     lower = validate_settings({'natural_lower': natural_lower})['natural_lower']
     values = reference_values(it)
     check_sample(values, int(it['n']))
+    location = location_reference_values(it)
+    check_location_sample(location, int(it['n']))
+    candidates = _diagnose_values(values, lower, cancel=cancel, progress=progress, max_candidates=max_candidates)
+    if progress is not None:
+        progress('위치 관리도 분포 진단: 부분군 평균' if int(it['n']) > 1 else '위치 관리도 분포 진단: 개별값')
+    chart_candidates = (candidates if int(it['n']) == 1 else
+                        _diagnose_values(location, lower, cancel=cancel, progress=progress, max_candidates=max_candidates))
+    eligible = [row for row in candidates if row['eligible']]
+    chart_eligible = [row for row in chart_candidates if row['eligible']]
+    return dict(digest=fingerprint(it, lower), candidates=candidates, chart_candidates=chart_candidates,
+                recommended=eligible[0]['family'] if eligible else None,
+                chart_recommended=chart_eligible[0]['family'] if chart_eligible else None,
+                reference=it['limit_reference_label'], n=int(it['n']),
+                natural_lower=lower, version=MODEL_VERSION, max_candidates=max_candidates,
+                chart_fit_target='individual' if int(it['n']) == 1 else 'subgroup_mean')
+
+
+def _diagnose_values(values, lower, *, cancel=None, progress=None, max_candidates=None):
     candidates = []
     if max_candidates is None:
         for family in FAMILIES:
@@ -243,11 +275,7 @@ def diagnose_distribution(it, natural_lower=None, *, cancel=None, progress=None,
             if any(row['eligible'] for row in batch):
                 break
     candidates.sort(key=lambda row: (not row['eligible'], row.get('aicc', np.inf), row['family']))
-    eligible = [row for row in candidates if row['eligible']]
-    return dict(digest=fingerprint(it, lower), candidates=candidates,
-                recommended=eligible[0]['family'] if eligible else None,
-                reference=it['limit_reference_label'], n=int(it['n']),
-                natural_lower=lower, version=MODEL_VERSION, max_candidates=max_candidates)
+    return candidates
 
 
 def frozen_model(record):
@@ -255,31 +283,15 @@ def frozen_model(record):
 
 
 def pearson_limits(model, n, *, cancel=None):
-    key = (MODEL_VERSION, model['family'], tuple(model['params']), n, SIMULATION_SAMPLES)
-    cached = _get(_limit_cache, key)
-    if cached is not None:
-        return cached
+    """Direct quantiles of the fitted plotted statistic; n does not rescale it."""
+    _cancelled(cancel)
     frozen = frozen_model(model)
-    if n == 1:
-        low, high = frozen.ppf([ALPHA, 1-ALPHA])
-        return dict(lcl=float(low), ucl=float(high), r_lcl=np.nan, r_ucl=np.nan,
-                    simulation_samples=0, seed=SEED)
-    rng = np.random.default_rng(SEED)
-    mean_samples = np.empty(SIMULATION_SAMPLES)
-    spread_samples = np.empty(SIMULATION_SAMPLES)
-    batch = max(1, min(10000, 2_000_000//n))
-    for start in range(0, SIMULATION_SAMPLES, batch):
-        _cancelled(cancel)
-        stop = min(start+batch, SIMULATION_SAMPLES)
-        draws = frozen.rvs(size=(stop-start, n), random_state=rng)
-        mean_samples[start:stop] = draws.mean(axis=1)
-        spread_samples[start:stop] = (np.ptp(draws, axis=1) if n < 10 else draws.std(axis=1, ddof=1))
-    lcl, ucl = np.quantile(mean_samples, [ALPHA, 1-ALPHA])
-    r_lcl, r_ucl = np.quantile(spread_samples, [ALPHA, 1-ALPHA])
-    if not np.isfinite([lcl, ucl, r_lcl, r_ucl]).all() or lcl >= ucl or r_lcl >= r_ucl:
-        raise ValueError('Pearson 모의실험 한계가 유효하지 않습니다.')
-    return _put(_limit_cache, key, dict(lcl=float(lcl), ucl=float(ucl), r_lcl=float(r_lcl),
-                                      r_ucl=float(r_ucl), simulation_samples=SIMULATION_SAMPLES, seed=SEED), 8)
+    low, high = frozen.ppf([CHART_TAIL, 1-CHART_TAIL])
+    if not np.isfinite([low, high]).all() or low >= high:
+        raise ValueError('Pearson 위치 분포의 꼬리 분위수가 유효하지 않습니다.')
+    return dict(lcl=float(low), ucl=float(high), simulation_samples=0, seed=SEED,
+                chart_fit_target='individual' if n == 1 else 'subgroup_mean',
+                chart_limit_method='AIAG–VDA 9.3.5.2 · 위치 통계량 직접 적합 · 0.135%/99.865% 분위수')
 
 
 def capability_indices(frozen, usl=np.nan, lsl=np.nan):
@@ -315,15 +327,18 @@ def apply_analysis(result, config):
               distribution_settings=cfg, distribution_model=None, capability_methods={},
               chart_fit_status='미확인', performance_fit_status='미확인',
               effective_rules={'T1': True, **{f'T{i}': False for i in range(2, 9)}},
-              pearson_rules_note='Pearson 모드는 비대칭 관리한계 이탈(T1)만 검출합니다. T2~T8·정규 σ 구역은 미적용입니다.',
+              pearson_rules_note='Pearson 위치 관리도는 직접 적합한 위치 분포의 분위수 이탈(T1)만 검출합니다. 산포는 Shewhart R/S 한계를 사용합니다. T2~T8·정규 σ 구역은 미적용입니다.',
+              dispersion_limit_method='Shewhart R/S · AIAG–VDA 9.3.5.2 산포 관리도 참조',
               within_capability_note='비정규 모드에서 정규식 기반 군내·목표치 지수는 미적용입니다.',
               performance_note='선택·검증된 개별값 분포의 G/Z 결과입니다. 관측 구간 검증은 공식 능력 입증과 구분하세요.')
     for key in ('cp', 'cpk', 'pp', 'ppk', 'cw', 'cwk', 'cpm', 'cpmk', 'std_within',
                 'ppm_cpk', 'ppm_ppk', 'ppm_within', 'within_overall_ratio', 'stab_ratio'):
         it[key] = np.nan
     # Never present normal control limits/signals as Pearson results on failed selection.
-    for key in ('ucl', 'lcl', 'r_ucl', 'r_lcl'):
+    for key in ('ucl', 'lcl'):
         it[key] = np.nan
+    if it['n'] == 1:
+        it['r_ucl'] = it['r_lcl'] = np.nan
     it['chart_mode'] = 'Pearson (분포 확인 필요)'
     it['ksq_counts'] = {f'T{i}': 0 for i in range(1, 9)}
     it['ksq_idx'] = {f'T{i}': set() for i in range(1, 9)}
@@ -336,20 +351,23 @@ def apply_analysis(result, config):
     it['ksq_counts_baseline'] = dict(it['ksq_counts'])
     it['ksq_counts_monitor'] = dict(it['ksq_counts'])
     try:
-        if not cfg['family'] or cfg['confirmed_digest'] != fingerprint(it, cfg['natural_lower']):
+        if not cfg['family'] or not cfg['chart_family'] or cfg['confirmed_digest'] != fingerprint(it, cfg['natural_lower']):
             raise ValueError('분포 선택·확인 필요: 데이터·부분군·규격·기준구간 변경 후에는 다시 확인하세요.')
         reference = reference_values(it)
+        location = location_reference_values(it)
         values = np.asarray(it['series'])
         check_sample(reference, int(it['n']))
-        chart_model = fit_checked(reference, cfg['family'], cfg['natural_lower'])
+        check_location_sample(location, int(it['n']))
+        chart_model = fit_checked(location, cfg['chart_family'], cfg['natural_lower'])
+        chart_model['fit_target'] = 'individual' if it['n'] == 1 else 'subgroup_mean'
         it['chart_model'] = chart_model
         if not chart_model['eligible']:
             raise ValueError('기준분포 부적합: ' + chart_model['reason'])
         it['chart_fit_status'] = '적합도 기준 통과'
         limits = pearson_limits(chart_model, int(it['n']))
         it.update(limits)
-        it['chart_mode'] = 'Pearson I (MR 참고)' if it['n'] == 1 else f'Pearson Xbar / 모형 기반 {it["dispersion_kind"]}'
-        it['limit_reference_desc'] += f' · {chart_model["name"]} 분위수 · ' + ('해석적 한계' if it['n'] == 1 else f'모의실험 {SIMULATION_SAMPLES:,}개 부분군')
+        it['chart_mode'] = 'Pearson I (MR 참고)' if it['n'] == 1 else f'Pearson Xbar / Shewhart {it["dispersion_kind"]}'
+        it['limit_reference_desc'] += f' · {chart_model["name"]} 위치 분포 직접 적합 · 0.135%/99.865% 분위수'
         it['xbarbar'] = float(np.mean(reference))
         xc = _segment_violation_counts(it['means'], it['ucl'], it['lcl'], it['baseline_display_count'])
         rc = _segment_violation_counts(it['ranges'], it['r_ucl'], it['r_lcl'], it['baseline_r_display_count'])
@@ -371,10 +389,11 @@ def apply_analysis(result, config):
         it['baseline_ctrl_total'] = xc['baseline'] + rc['baseline']
         baseline_bad = it['control_phase'] == 'phase2' and it['baseline_ctrl_total'] > 0
         it['baseline_status'] = ('부적합' if baseline_bad else '적합') if it['control_phase'] == 'phase2' else '해당없음'
-        it['baseline_reasons'] = ['기준구간 Pearson 관리이탈'] if baseline_bad else []
+        it['baseline_reasons'] = ['기준구간 관리이탈: 원인 조사 전 관리한계는 잠정값'] if baseline_bad else []
         it['recent_ctrl_violation'] = int(it['means'][-1] > it['ucl'] or it['means'][-1] < it['lcl']
                                            or (it['n'] > 1 and (it['ranges'][-1] > it['r_ucl'] or it['ranges'][-1] < it['r_lcl'])))
         performance_model = fit_checked(values, cfg['family'], cfg['natural_lower'])
+        performance_model['fit_target'] = 'individual'
         it['distribution_model'] = performance_model
         if not performance_model['eligible']:
             raise ValueError('전체 성능분포 부적합: ' + performance_model['reason'])
@@ -408,6 +427,7 @@ def apply_analysis(result, config):
                   capability_reasons=[message], reliability_status='검토필요', reliability_reasons=[message])
         if it['chart_fit_status'] != '적합도 기준 통과':
             it['chart_fit_status'] = message
+            it['r_ucl'] = it['r_lcl'] = np.nan
         else:
             it['performance_fit_status'] = message
     it['reliability_reason_text'] = ', '.join(it['reliability_reasons'])
