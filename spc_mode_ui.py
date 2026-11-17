@@ -153,7 +153,10 @@ def quick_results(results, beginner=True):
             if it.get('pre_msg'):
                 st.info(it['pre_msg'])
             st.plotly_chart(build_interactive_control_chart(view, st.session_state['palette'],
-                st.session_state['ksq_toggles']), use_container_width=True, key='quick_chart')
+                st.session_state['ksq_toggles']), width='stretch', height=760, theme=None, key='quick_chart',
+                config={"displaylogo": False, "scrollZoom": True, "doubleClick": "reset",
+                        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                        "toImageButtonOptions": {"filename": "SPC_control_chart", "scale": 2}})
             st.caption('위: 측정값의 위치 변화 · 아래: 측정값 사이의 흔들림. 빨간 점은 관리한계 이탈, 노란 점은 패턴 신호입니다.')
             if has_spec and it['spec_violation_count']:
                 raw = it['raw_series']

@@ -447,50 +447,91 @@ def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=Non
     rules = [', '.join(k for k, indices in it.get('ksq_idx', {}).items()
                        if enabled.get(k, True) and i in indices) or '없음'
              for i in range(len(means))]
-    figure = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.13,
-                           row_heights=[.65, .35], subplot_titles=['측정값 / 부분군 평균', '변동 · ' + it['dispersion_kind']])
-    custom = [[labels[i], rules[i]] for i in range(len(means))]
+    ink = '#E2E8F0' if palette == 'dark' else '#1E293B'
+    figure = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.16,
+                           row_heights=[.58, .42], subplot_titles=['측정값 / 부분군 평균', '변동 · ' + it['dispersion_kind']])
+    # Keep the first two fields stable for callers; include limits in every point tooltip.
+    def point_data(point_labels, values, lower, center, upper, point_rules=None):
+        return [[str(label), point_rules[i] if point_rules is not None else '없음',
+                 '상한 초과' if value > upper else '하한 미만' if value < lower else '관리한계 내',
+                 lower, center, upper] for i, (label, value) in enumerate(zip(point_labels, values))]
+
+    hover = ('<b>순서 %{x} · 라벨 %{customdata[0]}</b><br>'
+             '<b>값 %{y:.6g}</b> · %{customdata[2]}<br>'
+             'UCL %{customdata[5]:.6g} / CL %{customdata[4]:.6g} / LCL %{customdata[3]:.6g}'
+             '<br>위반 규칙: %{customdata[1]}<extra></extra>')
+    custom = point_data(labels, means, it['lcl'], it['xbarbar'], it['ucl'], rules)
     figure.add_trace(go.Scatter(x=positions, y=means, mode='lines+markers', name='측정값',
-        line=dict(color=colors['primary'], width=2.2), marker=dict(size=7), customdata=custom,
-        hovertemplate='순서 %{x}<br>측정 라벨 %{customdata[0]}<br>값 %{y:.6g}<br>규칙 %{customdata[1]}<extra></extra>'), row=1,col=1)
+        line=dict(color=colors['primary'], width=2.3), marker=dict(size=8), customdata=custom,
+        hovertemplate=hover), row=1,col=1)
     bad = (means > it['ucl']) | (means < it['lcl'])
     figure.add_trace(go.Scatter(x=positions[bad], y=means[bad], mode='markers', name='관리한계 이탈',
-        marker=dict(color=colors['danger'],size=11,line=dict(color=colors['ax_bg'],width=1)),
+        marker=dict(color=colors['danger'],size=13,line=dict(color=colors['ax_bg'],width=1.5)),
         customdata=np.asarray(custom, dtype=object)[bad],
-        hovertemplate='측정 라벨 %{customdata[0]}<br>이탈 값 %{y:.6g}<br>규칙 %{customdata[1]}<extra></extra>'),row=1,col=1)
+        hovertemplate=hover),row=1,col=1)
     rpositions = positions[1:] if it['is_xmr'] else positions
+    rlabels = it.get('r_labels') or (labels[1:] if it['is_xmr'] else labels)
+    rlabels = _labels_or_fallback(rlabels, len(ranges), it['n'], it['is_xmr'])
+    rcustom = np.asarray(point_data(rlabels, ranges, it['r_lcl'], it['r_bar'], it['r_ucl']), dtype=object)
     figure.add_trace(go.Scatter(x=rpositions,y=ranges,mode='lines+markers',name=it['dispersion_kind'],
-        line=dict(color=colors['primary'],width=2.2),marker=dict(size=7),
-        hovertemplate='순서 %{x}<br>산포 %{y:.6g}<extra></extra>'),row=2,col=1)
+        line=dict(color=colors['primary'],width=2.3),marker=dict(size=8),customdata=rcustom,
+        hovertemplate=hover.replace('위반 규칙: %{customdata[1]}', '산포 관리한계와 비교')),row=2,col=1)
     rbad = (ranges > it['r_ucl']) | (ranges < it['r_lcl'])
     figure.add_trace(go.Scatter(x=rpositions[rbad], y=ranges[rbad], mode='markers',
         name='산포 관리한계 이탈',
-        marker=dict(color=colors['danger'], size=11, line=dict(color=colors['ax_bg'], width=1)),
-        hovertemplate='순서 %{x}<br>산포 이탈 %{y:.6g}<extra></extra>'), row=2, col=1)
+        marker=dict(color=colors['danger'], size=13, line=dict(color=colors['ax_bg'], width=1.5)),
+        customdata=rcustom[rbad],
+        hovertemplate=hover.replace('위반 규칙: %{customdata[1]}', '산포 관리한계와 비교')), row=2, col=1)
     rule_bad = np.array([rule != '없음' for rule in rules]) & ~bad
     figure.add_trace(go.Scatter(x=positions[rule_bad], y=means[rule_bad], mode='markers',
         name='KSQ 규칙 위반', customdata=np.asarray(custom, dtype=object)[rule_bad],
-        marker=dict(color=colors['warning'], size=10, symbol='diamond',
+        marker=dict(color=colors['warning'], size=12, symbol='diamond',
                     line=dict(color=colors['ax_bg'], width=1)),
-        hovertemplate='측정 라벨 %{customdata[0]}<br>값 %{y:.6g}<br>규칙 %{customdata[1]}<extra></extra>'), row=1, col=1)
+        hovertemplate=hover), row=1, col=1)
+    for annotation in figure.layout.annotations:
+        annotation.update(x=0, xanchor='left', font=dict(size=17, color=ink))
     for row, keys in [(1,('ucl','xbarbar','lcl')), (2,('r_ucl','r_bar','r_lcl'))]:
+        # Space the right-hand labels even when two limits are very close.
+        values = np.asarray(means if row == 1 else ranges, dtype=float)
+        extent = np.concatenate((values, np.asarray([it[k] for k in keys], dtype=float)))
+        extent = extent[np.isfinite(extent)]
+        shifts = {}
+        if extent.size:
+            low, high = float(extent.min()), float(extent.max())
+            pad = (high - low) * .12 or max(abs(high) * .05, .001)
+            axis_range = [low-pad, high+pad]
+            figure.update_yaxes(range=axis_range, row=row, col=1)
+            domain = (figure.layout.yaxis if row == 1 else figure.layout.yaxis2).domain
+            pixels_per_unit = 600 * (domain[1]-domain[0]) / (axis_range[1]-axis_range[0])
+            last_pixel = -np.inf
+            for key in sorted((k for k in keys if np.isfinite(it[k])), key=lambda k: it[k]):
+                actual_pixel = (it[key]-axis_range[0]) * pixels_per_unit
+                label_pixel = max(actual_pixel, last_pixel+23)
+                shifts[key] = label_pixel-actual_pixel
+                last_pixel = label_pixel
         for key,label in zip(keys,('UCL','CL','LCL')):
             value=it[key]
             if np.isfinite(value):
                 figure.add_hline(y=value,row=row,col=1,line_dash='dash',line_width=1.5,
                     line_color=colors['muted'] if label=='CL' else colors['danger'],
-                    annotation_text=f'{label} {value:.6g}',annotation_position='right')
+                    annotation_text=f'<b>{label}</b> {value:.6g}',annotation_position='right',
+                    annotation_font=dict(size=14, color=ink),annotation_bgcolor=colors['ax_bg'],
+                    annotation_borderpad=4,annotation_yshift=shifts.get(key,0))
         if it.get('control_phase')=='phase2':
             figure.add_vline(x=offset+it['baseline_display_count']+.5,row=row,col=1,line_dash='dot',line_color=colors['muted'])
-    figure.update_layout(height=620,hovermode='closest',dragmode='zoom',
+    figure.update_layout(height=760,hovermode='closest',dragmode='zoom',
         paper_bgcolor=colors['ax_bg'],plot_bgcolor=colors['ax_bg'],
-        font=dict(color='#E2E8F0' if palette == 'dark' else '#1E293B', size=14),
-        margin=dict(l=60,r=110,t=70,b=50),legend=dict(orientation='h',y=1.14),
-        uirevision=str(it['column'])+str(len(means)))
-    figure.update_xaxes(range=[offset+.5,offset+len(means)+.5],showgrid=False)
+        font=dict(color=ink, size=15), hoverlabel=dict(font_size=16, bgcolor=colors['ax_bg'], font_color=ink),
+        margin=dict(l=75,r=155,t=100,b=60,autoexpand=False),
+        legend=dict(orientation='h',y=1.08,yanchor='bottom',x=0,font=dict(size=14)),
+        uirevision=f"{it['column']}:{offset}:{len(means)}:{it['ucl']}:{it['r_ucl']}")
+    figure.update_xaxes(range=[offset+.5,offset+len(means)+.5],showgrid=False,
+                         tickfont=dict(size=14), nticks=12, automargin=True,
+                         showspikes=True, spikemode='across', spikesnap='cursor', spikecolor=colors['muted'])
     figure.update_xaxes(title_text='측정 순서',row=2,col=1)
     figure.update_xaxes(title_text=None,row=1,col=1)
-    figure.update_yaxes(gridcolor=colors['grid'],zeroline=False)
+    figure.update_xaxes(showticklabels=True,row=1,col=1)
+    figure.update_yaxes(gridcolor=colors['grid'],zeroline=False,tickfont=dict(size=14),nticks=6,automargin=True)
     return figure
 
 

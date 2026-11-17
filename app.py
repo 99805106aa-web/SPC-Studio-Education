@@ -2220,9 +2220,12 @@ def _render_control_chart_scrollable(it, palette, ksq_toggles, show_zones, displ
     it, _signals = paged_window(it, view_key)
     interactive = st.toggle("확대·측정점 확인", value=False, key=f"interactive_control_chart_{view_key}")
     if interactive:
-        st.caption("드래그로 확대하고 두 번 클릭하면 전체 보기로 돌아갑니다. 점에 마우스를 올려 값과 위반 규칙을 확인하세요.")
-        st.plotly_chart(build_interactive_control_chart(it, palette, ksq_toggles), use_container_width=True, key=f"chart_{view_key}",
-                        config={"displaylogo": False, "scrollZoom": True})
+        st.caption("드래그: 구간 확대 · 두 번 클릭: 전체 보기 · 점에 마우스: 측정값·관리한계·위반 규칙 확인. 빨간 원은 관리한계 이탈, 주황 마름모는 패턴 규칙 위반입니다.")
+        st.plotly_chart(build_interactive_control_chart(it, palette, ksq_toggles), width='stretch', height=760,
+                        theme=None, key=f"chart_{view_key}",
+                        config={"displaylogo": False, "scrollZoom": True, "doubleClick": "reset",
+                                "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                                "toImageButtonOptions": {"filename": "SPC_control_chart", "scale": 2}})
         return
     compact = str(display_mode).lower() == "compact"
     group_count = _control_group_count(it)
