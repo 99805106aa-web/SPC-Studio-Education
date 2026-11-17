@@ -18,6 +18,8 @@ def preserve_settings():
             'detail_var_sel', 'sb_smtp_host', 'sb_smtp_port', 'sb_smtp_user', 'sb_smtp_pass',
             'sb_from_addr', 'sb_to_addrs', 'sb_use_ssl', 'sb_use_starttls', 'sb_only_recent']
     keys += [k for k in st.session_state if k.startswith('process_info_') and not k.endswith('_btn')]
+    keys += [k for k in st.session_state if k.startswith(('dist_bounded_', 'dist_lower_',
+                                                         'dist_family_', 'dist_method_', 'dist_confirm_'))]
     for key in keys:
         if key in st.session_state:
             st.session_state[key] = st.session_state[key]

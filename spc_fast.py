@@ -7,7 +7,8 @@ import json
 import sys
 import numpy as np
 import pandas as pd
-from spc_core import load_data_df, run_full_analysis
+from spc_core import CALCULATION_VERSION, load_data_df, run_full_analysis
+from spc_nonnormal import MODEL_VERSION
 
 
 def estimated_bytes(value, seen=None):
@@ -78,6 +79,8 @@ def content_bytes(value):
 
 def analysis_key(kwargs):
     fields = dict(kwargs)
+    fields['calculation_version'] = CALCULATION_VERSION
+    fields['distribution_model_version'] = MODEL_VERSION
     fields.pop('progress_callback', None)
     for name in ('data_bytes', 'spec_bytes'):
         fields[name] = hashlib.sha256(content_bytes(fields.get(name))).hexdigest()
@@ -104,7 +107,9 @@ def ui_analysis(state, **kwargs):
     signature = analysis_key(dict(kwargs, detail_level='core'))
     old = state.get('_displayed_signature')
     results = state.get('results')
-    if old == signature and results and (level == 'core' or results[0].get('detail_level') == 'full'):
+    if (old == signature and results
+            and all(it.get('calculation_version') == CALCULATION_VERSION for it in results)
+            and (level == 'core' or results[0].get('detail_level') == 'full')):
         state['_active_result_reused'] = True
         return results, state['summary_df']
     state['_active_result_reused'] = False

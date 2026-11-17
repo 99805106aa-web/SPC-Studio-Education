@@ -14,9 +14,13 @@ def dashboard_rows(results):
         {'항목': str(it['column']), 'Cpk': number(it.get('cpk')),
          'Ppk': number(it.get('ppk')), '예측 PPM': number(it.get('ppm_ppk')),
          '관측 PPM': number(it.get('emp_ppm')),
-         '규격 이탈': it.get('spec_violation_count', 0)}
+         '규격 이탈': it.get('spec_violation_count', 0),
+         '능력 적용 상태': it.get('capability_status', '재분석 필요'),
+         '능력 적용 사유': '; '.join(it.get('capability_reasons', [])),
+         '계산법': it.get('capability_method', 'normal'),
+         '적용 분포': (it.get('distribution_model') or {}).get('name', '정규' if it.get('distribution_mode') != 'nonnormal' else '미확인')}
         for it in results
-    ], columns=['항목', 'Cpk', 'Ppk', '예측 PPM', '관측 PPM', '규격 이탈'])
+    ], columns=['항목', 'Cpk', 'Ppk', '예측 PPM', '관측 PPM', '규격 이탈', '능력 적용 상태', '능력 적용 사유', '계산법', '적용 분포'])
 
 
 def capability_figure(frame, metric='Cpk', focus=True, compare=False, palette=DEFAULT_PALETTE):
@@ -78,7 +82,8 @@ def render_dashboard(results, palette=DEFAULT_PALETTE):
     m2.metric('주의 · Cpk 1.00–1.33 미만', f"{int(((frame['Cpk'] >= 1) & (frame['Cpk'] < 1.33)).sum())}개")
     m3.metric('기준 충족 · Cpk ≥ 1.33', f"{int((frame['Cpk'] >= 1.33).sum())}개")
     missing = int(frame['Cpk'].isna().sum())
-    st.caption(f'전체 {len(frame)}개 항목 · Cpk 계산 불가 {missing}개')
+    st.caption(f'전체 {len(frame)}개 항목 · Cpk 적용 조건 미충족/계산 불가 {missing}개')
+    st.caption('Cp·Cpk는 관측 구간의 적용 조건을 확인합니다. 비정규 결과는 선택한 G/Z 방법과 적합분포를 확인하세요. Ppk·예측 PPM은 모형 참고값이며 공식 능력 입증과 구분하세요.')
     with st.expander('검색 · 표시 설정'):
         c1, c2 = st.columns(2)
         query = c1.text_input('항목 검색', key='dash_query')
@@ -113,9 +118,10 @@ def render_dashboard(results, palette=DEFAULT_PALETTE):
     if ppm.empty:
         st.info('예측 PPM을 계산할 수 있는 항목이 없습니다.')
     else:
-        st.caption('예측 PPM은 정규분포 가정에 따른 값이며, 관측 PPM은 실제 규격 이탈 비율입니다.')
+        st.caption('예측 PPM은 선택한 분포 모형의 규격 밖 확률이며, 관측 PPM은 원본의 실제 규격 이탈 비율입니다.')
+        from spc_core import fmt_ppm
         for name in ['예측 PPM', '관측 PPM']:
-            ppm[name] = ppm[name].map(lambda v: '—' if pd.isna(v) else '< 0.001' if 0 < v < .001 else f'{v:,.3f}')
+            ppm[name] = ppm[name].map(fmt_ppm)
         st.dataframe(ppm[['항목', '예측 PPM', '관측 PPM']], hide_index=True, use_container_width=True)
     with st.expander('전체 상세 수치 · CSV 다운로드'):
         detail = selected.sort_values(metric, kind='stable', na_position='last')

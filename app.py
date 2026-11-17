@@ -27,7 +27,7 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-from spc_access import education_mode, render_education_gate, ai_available
+from spc_access import education_mode, render_access_gate, ai_available
 
 # 실행 중 추가된 모듈은 네트워크 드라이브의 디렉터리 캐시에 없을 수 있다.
 importlib.invalidate_caches()
@@ -554,6 +554,7 @@ def _save_config():
         "openrouter_api_key": protect_key(st.session_state.get("openrouter_api_key", "")),
         "preprocess_outliers": st.session_state.get("preprocess_outliers", False),
         "outlier_method": st.session_state.get("outlier_method", "iqr"),
+        "distribution_settings": st.session_state.get("distribution_settings", {}),
         "box_cox_transform": st.session_state.get("box_cox_transform", False),
     }
     try:
@@ -665,6 +666,7 @@ def _current_analysis_meta(preview: dict | None = None) -> dict:
         "include_incomplete": bool(st.session_state.get("include_incomplete", False)),
         "preprocess_outliers": bool(st.session_state.get("preprocess_outliers", False)),
         "outlier_method": st.session_state.get("outlier_method", "iqr"),
+        "distribution_settings": st.session_state.get("distribution_settings", {}),
         "box_cox_transform": bool(st.session_state.get("box_cox_transform", False)),
         "ksq_rules": ", ".join(ksq_on) if ksq_on else "T1",
         "subgroup_columns": list(st.session_state.get("subgroup_columns", []) or []),
@@ -824,7 +826,7 @@ def _render_first_look(results: list):
     st.markdown("#### 먼저 볼 것")
     summary_items = [
         ("신뢰도", " / ".join(f"{k} {v}" for k, v in rel_counts.items())),
-        ("Cpk 최저", f"{worst.get('column')}: {fmt_value(worst.get('cpk'))}" if worst else "계산불가"),
+        ("Cpk 최저", f"{worst.get('column')}: {fmt_value(worst.get('cpk'))}" if worst else "적용 조건 미충족/계산불가"),
         ("규격 이탈", f"{spec_total:,}건"),
         ("관리 이탈", f"{ctrl_total:,}건"),
         ("기준구간", f"부적합 {len(baseline_bad)}개" if baseline_bad else "문제 없음"),
@@ -893,8 +895,8 @@ def _summary_visible_df(df):
             df["신뢰도"] = combined
         else:
             df.insert(insert_at, "신뢰도", combined)
-    if "안정성(Cpk/Ppk)" in df.columns:
-        df = df.rename(columns={"안정성(Cpk/Ppk)": "안정성"})
+    if "군내/전체 지수 비율(Cwk/Ppk)" in df.columns:
+        df = df.rename(columns={"군내/전체 지수 비율(Cwk/Ppk)": "군내/전체 지수 비율"})
     drop_cols = [c for c in SUMMARY_HIDDEN_COLUMNS if c in df.columns]
     return df.drop(columns=drop_cols) if drop_cols else df
 
@@ -920,6 +922,8 @@ def _refresh_analysis_modules():
 _refresh_analysis_modules()
 
 from spc_core import (
+    CALCULATION_VERSION,
+    WITHIN_CAPABILITY_NOTICE,
     analysis_options,
     assess_process,
     run_full_analysis,
@@ -943,6 +947,8 @@ from spc_charts import (
 )
 from spc_fast import BoundedCache, cached_analysis, cached_frame, analysis_key, ui_analysis
 from spc_mode_ui import preserve_settings, beginner_inputs, applied_conditions, quick_results, paged_window
+from spc_metric_ui import process_metric_cards_html
+from spc_distribution_ui import render_distribution_panel
 
 from spc_export import export_summary_excel, export_all_pdf, export_analysis_html, html_bytes_to_pdf, fig_to_bytes
 
@@ -1032,7 +1038,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-render_education_gate()
+render_access_gate()
 
 # ─────────────────────────── CSS 커스텀 ───────────────────────────
 st.markdown("""
@@ -1144,75 +1150,6 @@ html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-
 .warn  { color: #b45309; }
 .bad   { color: #b42318; }
 .muted { color: #475569; }
-.metric-hi {
-    border-radius: 0.55rem;
-    border: 1px solid transparent;
-    padding: 0.30rem 0.50rem 0.36rem;
-    min-height: 78px;
-}
-.metric-hi-label {
-    font-size: 0.84rem;
-    color: #64748b;
-    margin-bottom: 0.12rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.metric-hi-value {
-    font-size: 1.75rem;
-    line-height: 1.05;
-    font-weight: 600;
-    color: #1e293b;
-    font-variant-numeric: tabular-nums;
-}
-.metric-hi-tag {
-    margin-top: 0.16rem;
-    padding: 0.10rem 0.42rem;
-    border-radius: 999px;
-    font-size: 0.68rem;
-    font-weight: 700;
-    display: inline-block;
-}
-.metric-hi-warn {
-    border-color: rgba(245, 158, 11, 0.48);
-    background: linear-gradient(180deg, rgba(245,158,11,0.17) 0%, rgba(255,251,235,0.96) 100%);
-}
-.metric-hi-warn .metric-hi-value {
-    color: #92400e;
-}
-.metric-hi-warn .metric-hi-tag {
-    color: #92400e;
-    border: 1px solid rgba(245, 158, 11, 0.38);
-    background: rgba(255,255,255,0.62);
-}
-.metric-hi-bad {
-    border-color: rgba(220, 38, 38, 0.52);
-    background: linear-gradient(180deg, rgba(220,38,38,0.16) 0%, rgba(254,242,242,0.96) 100%);
-}
-.metric-hi-bad .metric-hi-value {
-    color: #991b1b;
-}
-.metric-hi-bad .metric-hi-tag {
-    color: #991b1b;
-    border: 1px solid rgba(220, 38, 38, 0.40);
-    background: rgba(255,255,255,0.62);
-}
-.metric-hi-compact {
-    min-height: 64px;
-    padding: 0.22rem 0.38rem 0.28rem;
-}
-.metric-hi-compact .metric-hi-label {
-    font-size: 0.78rem;
-}
-.metric-hi-compact .metric-hi-value {
-    font-size: 1.38rem;
-}
-.metric-hi-compact .metric-hi-tag {
-    font-size: 0.62rem;
-    margin-top: 0.10rem;
-    padding: 0.06rem 0.34rem;
-}
-
 /* 선별 요약 테이블 강조 */
 .stDataFrame td { font-size: 0.83rem; }
 
@@ -1410,6 +1347,7 @@ def _init_state():
         'data_layout_mode': saved.get('data_layout_mode', 'long'),
         'selected_columns': saved.get('selected_columns'),
         'subgroup_columns': saved.get('subgroup_columns', []),
+        'distribution_settings': saved.get('distribution_settings', {}),
         'subgroup_var_name': saved.get('subgroup_var_name', '측정치'),
         'measurement_date_column': saved.get('measurement_date_column', ''),
         'chart_usage_mode': saved.get('chart_usage_mode', 'phase1'),
@@ -1556,6 +1494,7 @@ def _file_watcher():
             st.session_state['active_spec_path'] = ''
             st.session_state['spec_file_name'] = ''
         st.session_state['_loaded_fav_name'] = fav.get('name', '')
+        st.session_state.pop('_input_identity', None)
         st.session_state['_watch_last_status'] = '감시 기준 저장'
         _save_config()
         return
@@ -1582,6 +1521,7 @@ def _file_watcher():
             st.session_state['active_spec_path'] = ''
             st.session_state['spec_file_name'] = ''
         st.session_state['_loaded_fav_name'] = fav.get('name', '')
+        st.session_state.pop('_input_identity', None)
         st.session_state['_trigger_analysis'] = True
         st.session_state['_watch_last_status'] = '변경 감지'
         _save_config()
@@ -1640,7 +1580,7 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
     lines.append(f"  분석 일시: {now}")
     lines.append("=" * 60)
 
-    total_bad, total_warn, total_spec, total_ctrl = 0, 0, 0, 0
+    total_bad, total_warn, total_spec, total_ctrl, total_review = 0, 0, 0, 0, 0
     detail_lines = []
 
     for fav_name, results in all_results:
@@ -1652,6 +1592,7 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
         total_warn += len(warn)
         total_spec += svio
         total_ctrl += cvio
+        total_review += sum(it.get('capability_status') != '적용 가능' for it in results)
 
         needs_review = [it for it in results if assess_process(it)['level'] != 'low']
         if not needs_review:
@@ -1667,11 +1608,14 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
             detail_lines.append(f"  {'변수':<18} {'Cpk':>7} {'Ppk':>7} {'PPM(내)':>12} {'규격이탈':>8}")
             detail_lines.append("  " + "-" * 58)
             for it in problem_items:
-                ppm_w = f"{it['ppm_cpk']:,.0f}" if np.isfinite(it.get('ppm_cpk', np.nan)) else "—"
+                ppm_w = f"{it.get('ppm_within', np.nan):,.0f}" if np.isfinite(it.get('ppm_within', np.nan)) else "—"
                 sv = it.get('spec_violation_count', 0)
                 detail_lines.append(f"  {it['column']:<18} {fmt_value(it['cpk']):>7} "
                                     f"{fmt_value(it['ppk']):>7} {ppm_w:>12} {sv:>8}")
                 detail_lines.append(f"    판정: {assess_process(it)['text']}")
+                detail_lines.append("    Cp·Cpk: " + it.get('capability_status', '재분석 필요') + " · " + "; ".join(it.get('capability_reasons', [])))
+                detail_lines.append("    Pp·Ppk/예상 PPM은 선택 분포의 모형 참고값입니다.")
+                detail_lines.append(f"    계산법: {it.get('capability_method', 'normal')} / 분포: {(it.get('distribution_model') or {}).get('name', '정규')}")
 
     # 전체 요약
     lines.append("")
@@ -1681,13 +1625,14 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
     lines.append(f"  - Cpk < 1.33 (주의)  : {total_warn}개")
     lines.append(f"  - 규격 이탈 (누적)   : {total_spec}건")
     lines.append(f"  - 관리 이탈 (누적)   : {total_ctrl}건")
+    lines.append(f"  - Cp·Cpk 검토 대상  : {total_review}개 (기준 충족/미달 집계 제외)")
     lines.extend(detail_lines)
     lines.append("")
     lines.append("=" * 60)
     lines.append("※ 본 메일은 SPC 웹앱 자동 발송입니다.")
     lines.append("=" * 60)
 
-    subject = f"[SPC 전체 알림] 불량 {total_bad}건 / 주의 {total_warn}건 — {now}"
+    subject = f"[SPC 전체 알림] 불량 {total_bad}건 / 주의 {total_warn}건 / 능력 검토 {total_review}개 — {now}"
     return subject, "\n".join(lines)
 
 
@@ -1716,7 +1661,8 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
     rule_items = [it for it in results if (
         any(len(it['means']) - 1 in indices for indices in it.get('ksq_idx', {}).values())
         if only_recent else any(it.get('ksq_counts', {}).values()))]
-    if not bad and not warn and not spec_vio and not ctrl_vio and not rule_items:
+    review_items = [it for it in results if it.get('capability_status') and it.get('capability_status') != '적용 가능']
+    if not bad and not warn and not spec_vio and not ctrl_vio and not rule_items and not review_items:
         return None, None
 
     lines = []
@@ -1732,6 +1678,12 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
     lines.append("▶ 요약")
     for item in results:
         lines.append(f"  {item['column']}: {assess_process(item)['text']}")
+        if item.get('capability_status') != '적용 가능':
+            lines.append("    Cp·Cpk: " + item.get('capability_status', '재분석 필요') + " — " + "; ".join(item.get('capability_reasons', [])))
+    lines.append("  Pp·Ppk/예상 PPM은 선택 분포 모형의 참고값이며, 정규식 Cw·Cwk는 군내 진단용입니다.")
+    for item in results:
+        if item.get('distribution_mode') == 'nonnormal':
+            lines.append(f"  {item['column']}: 분포 {(item.get('distribution_model') or {}).get('name', '미확인')} / 방법 {item.get('capability_method')} / Pearson T1만 적용")
     if rule_items:
         lines.append("  KSQ 규칙 확인: " + ", ".join(str(item['column']) for item in rule_items))
     lines.append(f"  - 분석 변수 수       : {len(results)}개")
@@ -1739,6 +1691,7 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
     lines.append(f"  - Cpk < 1.33 (주의)  : {len(warn)}개")
     lines.append(f"  - 규격 이탈 변수     : {len(spec_vio)}개")
     lines.append(f"  - 관리한계 이탈 변수 : {len(ctrl_vio)}개")
+    lines.append(f"  - Cp·Cpk 검토 대상  : {len(review_items)}개 (기준 충족/미달 집계 제외)")
 
     # 불량 변수 상세
     if bad:
@@ -1747,7 +1700,7 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
         lines.append(f"  {'변수':<18} {'Cpk':>7} {'Ppk':>7} {'PPM(내)':>12} {'PPM(외)':>12} {'규격이탈':>8} {'관리이탈':>8}")
         lines.append("  " + "-" * 78)
         for it in bad:
-            ppm_w = f"{it['ppm_cpk']:,.0f}" if np.isfinite(it.get('ppm_cpk', float('nan'))) else "—"
+            ppm_w = f"{it.get('ppm_within', np.nan):,.0f}" if np.isfinite(it.get('ppm_within', float('nan'))) else "—"
             ppm_o = f"{it['ppm_ppk']:,.0f}" if np.isfinite(it.get('ppm_ppk', float('nan'))) else "—"
             sv = it.get('spec_violation_count', 0)
             cv = _get_ctrl_total(it)
@@ -1761,7 +1714,7 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
         lines.append(f"  {'변수':<18} {'Cpk':>7} {'Ppk':>7} {'PPM(내)':>12} {'PPM(외)':>12} {'규격이탈':>8} {'관리이탈':>8}")
         lines.append("  " + "-" * 78)
         for it in warn:
-            ppm_w = f"{it['ppm_cpk']:,.0f}" if np.isfinite(it.get('ppm_cpk', float('nan'))) else "—"
+            ppm_w = f"{it.get('ppm_within', np.nan):,.0f}" if np.isfinite(it.get('ppm_within', float('nan'))) else "—"
             ppm_o = f"{it['ppm_ppk']:,.0f}" if np.isfinite(it.get('ppm_ppk', float('nan'))) else "—"
             sv = it.get('spec_violation_count', 0)
             cv = _get_ctrl_total(it)
@@ -1789,13 +1742,19 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
 
     n_bad, n_warn = len(bad), len(warn)
     src = f" [{source_name}]" if source_name else ""
-    subject = f"[SPC 이상 알림]{src} 불량 {n_bad}건 / 주의 {n_warn}건 — {now}"
+    subject = f"[SPC 이상 알림]{src} 불량 {n_bad}건 / 주의 {n_warn}건 / 능력 검토 {len(review_items)}개 — {now}"
     return subject, "\n".join(lines)
 
 
 # ─────────────────────────── 이력 헬퍼 ───────────────────────────
 def _push_analysis_history(results: list, source: str = ""):
     entry = {
+        'calculation_version': CALCULATION_VERSION,
+        'model_signature': json.dumps({str(it['column']): {
+            'mode': it.get('distribution_mode', 'normal'), 'method': it.get('capability_method', 'normal'),
+            'family': (it.get('distribution_settings') or {}).get('family'),
+            'lower': (it.get('distribution_settings') or {}).get('natural_lower')}
+            for it in results}, sort_keys=True),
         'time': datetime.datetime.now().strftime("%m-%d %H:%M"),
         'source': source or st.session_state.get('_loaded_fav_name', ''),
         'n_vars': len(results),
@@ -2343,6 +2302,11 @@ with st.sidebar:
                                     st.session_state["spec_file_name"] = ""
                                 # rerun 후 toast 표시를 위해 플래그 사용
                                 st.session_state["_loaded_fav_name"] = fav["name"]
+                                st.session_state.pop('_input_identity', None)
+                                st.session_state.pop('data_uploader', None)
+                                st.session_state.pop('spec_uploader', None)
+                                from spc_file_ui import invalidate_analysis
+                                invalidate_analysis(st.session_state)
                                 st.session_state["_fav_toast"] = True
                                 st.session_state["_fav_toast_msg"] = f"'{fav['name']}' 불러오기 완료 — ▶ 분석 시작을 눌러주세요"
                                 _save_config()
@@ -2486,34 +2450,8 @@ with st.sidebar:
         from spc_education import render_samples
         render_samples()
 
-    # ── 데이터 파일 ──
-    st.markdown("### 📁 데이터 파일")
-    data_file = st.file_uploader(
-        "데이터 Excel / CSV 업로드",
-        type=["xlsx", "xls", "csv"],
-        key="data_uploader",
-        help="수치형 컬럼을 자동 인식합니다.",
-    )
-    if data_file:
-        st.session_state['data_bytes'] = data_file.getvalue()
-        st.session_state['active_data_path'] = ''
-        st.session_state['data_file_name'] = data_file.name
-        st.session_state['_loaded_fav_name'] = data_file.name
-    _show_loaded_file("data")
-
-    # ── 규격 파일 (선택) ──
-    st.markdown("### 📋 규격 파일 (선택)")
-    spec_file = st.file_uploader(
-        "규격 Excel / CSV 업로드",
-        type=["xlsx", "xls", "csv"],
-        key="spec_uploader",
-        help="형식: 컬럼명 | USL | LSL | Target(선택)",
-    )
-    if spec_file:
-        st.session_state['spec_bytes'] = spec_file.getvalue()
-        st.session_state['active_spec_path'] = ''
-        st.session_state['spec_file_name'] = spec_file.name
-    _show_loaded_file("spec")
+    from spc_file_ui import render_file_inputs
+    render_file_inputs()
 
     if not _bm:
         # ── 공정 정보 (선택) ──
@@ -2574,6 +2512,7 @@ with st.sidebar:
                             st.session_state['measurement_date_column'] = p.get('measurement_date_column', '')
                             st.session_state['chart_usage_mode'] = p.get('chart_usage_mode', 'phase1')
                             st.session_state['baseline_subgroups'] = p.get('baseline_subgroups', 25)
+                            st.session_state['distribution_settings'] = p.get('distribution_settings', {})
                             st.session_state['hist_bins'] = p['hist_bins']
                             st.session_state['palette'] = p['palette']
                             st.session_state['ksq_toggles'] = p['ksq_toggles']
@@ -2774,6 +2713,7 @@ with st.sidebar:
                         'palette': st.session_state['palette'],
                         'ksq_toggles': st.session_state['ksq_toggles'],
                         'show_zones': st.session_state['show_zones'],
+                        'distribution_settings': st.session_state.get('distribution_settings', {}),
                     }
                     existing = [p for p in st.session_state.get('param_presets', []) if p['name'] != new_p['name']]
                     existing.append(new_p)
@@ -2962,19 +2902,20 @@ with st.sidebar:
             st.markdown("""
     | 용어 | 쉬운 설명 |
     |------|-----------|
-    | **Cp** | 단기(군내) 분산 기준 잠재 공정능력. 중심 치우침은 반영하지 않음 |
+    | **Cp** | 전체 산포 기준 공정능력. 적용 조건 충족 시 표시 |
     | **Cpk** | 공정능력 지수. 규격 대비 공정 위치와 퍼짐을 반영. ≥1.33 권장 |
-    | **Pp** | 장기(전체) 분산 기준 잠재 공정능력. 중심 치우침은 반영하지 않음 |
-    | **Ppk** | 장기 공정능력 지수. 전체 변동 포함. Cpk와 차이가 크면 공정 불안정 |
+    | **Pp** | 전체 산포 기준 공정성능 참고값. 중심 치우침은 반영하지 않음 |
+    | **Ppk** | 전체 변동 기준 성능 지수. 분포 모델과 공정 조건을 함께 확인 |
     | **Cpm** | 목표치(T) 반영 공정능력 지수. 평균이 목표치에서 멀수록 낮아짐 |
     | **Cpmk** | 목표치(T) + 규격 한쪽 치우침을 함께 반영한 공정능력 지수 |
+    | **Cw / Cwk** | 군내 변동에 기반한 공정 진단 지수. n≥2에서 계산하며 이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않음. Cp/Cpk와 별도로 군내 산포로 계산 |
     | **UCL/LCL** | 관리 상한/하한선 (평균 ± 3σ). 이 선을 벗어나면 이상 신호 |
     | **USL/LSL** | 규격 상한/하한선 (고객·도면 기준) |
     | **PPM** | 100만 개 생산 시 불량 예상 개수 |
     | **σ (시그마)** | 표준편차 — 데이터가 평균에서 얼마나 떨어져 있는지 |
     | **σ(군내)** | 단기 공정 변동 (같은 조건에서의 흔들림) |
     | **σ(전체)** | 장기 공정 변동 (시간에 따른 전체 흔들림) |
-    | **안정성** | Cpk/Ppk 비율. 1에 가까울수록 공정이 안정적 |
+    | **군내/전체 지수 비율** | abs(Cwk/Ppk). 변동 차이 진단용이며 안정성 검정이 아님 |
     | **KSQ 규칙** | 관리도에서 이상 패턴을 찾는 8가지 통계 규칙 |
     | **해석용 관리도** | 현재 데이터로 시험 관리한계를 계산해 공정 안정 상태를 확인하는 단계 |
     | **관리용 관리도** | 안정 구간으로 한계선을 고정한 뒤 이후 데이터만 감시하는 운영 단계 |
@@ -2983,10 +2924,12 @@ with st.sidebar:
     | **I-MR (X-MR)** | n=1일 때: 개별값-이동범위 관리도 |
 
     ### 지수 공식
-    - `Cp = (USL - LSL) / (6σ_within)`
-    - `Cpk = min((USL - μ)/(3σ_within), (μ - LSL)/(3σ_within))`
+    - `Cp = (USL - LSL) / (6s_overall), 적용 조건 충족 시`
+    - `Cpk = min((USL - μ)/(3s_overall), (μ - LSL)/(3s_overall)), 적용 조건 충족 시`
     - `Pp = (USL - LSL) / (6σ_overall)`
     - `Ppk = min((USL - μ)/(3σ_overall), (μ - LSL)/(3σ_overall))`
+    - `Cw = (USL - LSL)/(6σ_within), n≥2 진단용`
+    - `Cwk = min((USL - μ)/(3σ_within), (μ - LSL)/(3σ_within)), n≥2 진단용`
     - `Cpm = (USL - LSL) / (6√(σ_overall² + (μ - T)²))`
     - `Cpmk = min((USL - μ)/(3√(σ_overall² + (μ - T)²)), (μ - LSL)/(3√(σ_overall² + (μ - T)²)))`
 
@@ -3101,7 +3044,7 @@ if run_btn or _auto_triggered:
                 # 자동 감시 트리거 + 이탈 발생 시 전체 즐겨찾기 분석 후 통합 이메일 발송
                 if _auto_triggered and st.session_state.get('auto_watch_enabled'):
                     _has_violation = (
-                        any(assess_process(it)['level'] == 'high' for it in results)
+                        any(assess_process(it)['level'] != 'low' for it in results)
                         or
                         any(np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < 1.33 for it in results)
                         or any(it.get('spec_violation_count', 0) > 0 for it in results)
@@ -3150,7 +3093,10 @@ if run_btn or _auto_triggered:
 # Both modes share complete statistics; upgrade results retained by older sessions.
 if st.session_state.get('analysis_done'):
     _current_results = st.session_state.get('results', [])
-    if any(it.get('detail_level') == 'core' for it in _current_results):
+    if any(it.get('detail_level') == 'core' or it.get('calculation_version') != CALCULATION_VERSION for it in _current_results):
+        if not st.session_state.get('_analysis_request'):
+            st.warning('계산 기준이 변경되었습니다. 파일을 확인하고 재분석해 주세요. 이전 결과는 표시하지 않습니다.')
+            st.stop()
         with st.spinner('공정능력과 상세 통계 계산 중...'):
             _request = dict(st.session_state['_analysis_request'], detail_level='full')
             _full, _summary = ui_analysis(st.session_state, **_request)
@@ -3208,7 +3154,7 @@ if st.session_state.get('analysis_done') and all(it.get('detail_level') != 'core
     elif _watch_status:
         _watch_detail += f" · {_watch_status}"
     _watch_badge = f'<span style="background:rgba(34,197,94,0.7);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">🔄 감시중: {_watch_detail}</span>' if _watch_on else ''
-    _ok_badge    = '<span style="background:rgba(34,197,94,0.7);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">✓ 전체 정상</span>' if not _nb and not _nw and not _ns else ''
+    _ok_badge    = '<span style="background:rgba(34,197,94,0.7);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">✓ 관측 구간 양호</span>' if _r and all(assess_process(it)['level'] == 'low' for it in _r) else ''
 
     _src_txt = f" | {_src}" if _src else ""
     st.markdown(
@@ -3299,11 +3245,11 @@ if not st.session_state['analysis_done']:
 - **Xbar-R 관리도**: n=2~9일 때 부분군 평균-범위 관리도
 - **Xbar-S 관리도**: n≥10일 때 부분군 평균-표준편차 관리도 (자동 전환)
 - **I-MR 관리도**: n=1일 때 개별값-이동범위 관리도
-- **공정능력 지수**: Cp, Cpk, Pp, Ppk, Cpm, Cpmk (단측 규격 지원, 목표치 반영)
+- **공정능력 지수**: Cp, Cpk, Pp, Ppk, Cpm, Cpmk (단측 규격 지원, 목표치 반영), Cw·Cwk (n≥2, 군내 능력 진단용)
 - **PPM 계산**: Within/Overall/실측 불량률
 - **KSQ 규칙 검출**: KS Q ISO 7870-2 T1~T8 규칙 위반점 표시
 - **정규성 검정**: Shapiro-Wilk (n≤50) / Anderson-Darling (n>50)
-- **Excel 내보내기**: 선별 요약 + 변수별 상세 (Cpk/Ppk/Cpm/Cpmk < 1.33 분홍 강조)
+- **Excel 내보내기**: 선별 요약 + 변수별 상세 (Cpk/Cpm/Cpmk < 1.33 분홍 강조)
 - **PDF 내보내기**: 전체 관리도/히스토그램/QQ 플롯
 - **HTML 내보내기**: 공유용 단일 리포트(요약표 + 변수별 요약 + 차트)
 - **이메일 알림**: SMTP SSL/STARTTLS 지원
@@ -3359,6 +3305,8 @@ _render_process_info_summary(st.session_state.get('analysis_meta', {}))
 st.markdown("---")
 
 # ── 초보자 모드 배너 ──
+st.caption(WITHIN_CAPABILITY_NOTICE)
+st.caption(f"Cp·Cpk 적용 조건 미충족/계산불가: {sum(it.get('capability_status') != '적용 가능' for it in results)}개 · 기준 충족/미달 집계에서 제외")
 if st.session_state.get('beginner_mode'):
     st.info(
         "🔰 **초보자 모드 활성화 중** — 지표 이름이 쉬운 표현으로 표시되고, "
@@ -3614,7 +3562,8 @@ with tab_dash:
             st.dataframe(_df_hist, use_container_width=True, hide_index=True)
 
             # Cpk 추이 비교 (공통 변수)
-            if len(hist_list) >= 2:
+            if (len(hist_list) >= 2 and all(h.get('calculation_version') == CALCULATION_VERSION for h in hist_list[-2:])
+                    and hist_list[-2].get('model_signature') == hist_list[-1].get('model_signature')):
                 st.markdown("**Cpk 변화 추이 (현재 vs 이전)**")
                 prev = hist_list[-2]['cpk_list']
                 curr = hist_list[-1]['cpk_list']
@@ -3629,6 +3578,8 @@ with tab_dash:
                                            '현재 Cpk': f"{cv:.3f}" if np.isfinite(cv) else "—",
                                            '변화': f"{diff:+.3f}" if np.isfinite(diff) else "—"})
                     st.dataframe(pd.DataFrame(trend_rows), use_container_width=True, hide_index=True)
+            elif len(hist_list) >= 2:
+                st.caption('계산 버전·분포·계산 방법이 다른 이력은 Cpk를 직접 비교하지 않습니다. 같은 기준으로 재분석해 주세요.')
 
     # ══════════════════════════════════════════════
     # TAB: 선별 요약
@@ -3745,7 +3696,7 @@ with tab_summ:
 with tab_stab:
     if tab_stab.open:
         st.subheader("공정 능력 · 변동 평가")
-        st.caption("전체 공정능력과 장·단기 변동 차이를 함께 확인합니다. 공정 안정성은 관리도 결과와 함께 판단하세요.")
+        st.caption("전체 성능 참고값과 군내·전체 변동 차이를 함께 확인합니다. 공정 안정성은 관리도 결과와 함께 판단하세요.")
         limit_col, ratio_col, view_col = st.columns([1, 1, 2])
         with limit_col:
             stab_ppk = st.number_input("Ppk 충족 기준", min_value=0.1, value=1.33,
@@ -3758,13 +3709,13 @@ with tab_stab:
                                  horizontal=True, key="stab_view")
         opt1, opt2 = st.columns(2)
         stab_labels = opt1.checkbox("항목명 표시", value=False, key="stab_labels")
-        stab_contour = opt2.checkbox("Cpk = 1 등고선 표시", value=False, key="stab_contour")
+        stab_contour = opt2.checkbox("Cwk = 1 등고선 표시", value=False, key="stab_contour")
         st.caption("기본 구분값: Ppk 1.33 / 비율 1.25 · 사내·고객 기준에 맞게 조정하세요. 비율 기준은 안정성 검정의 임계값이 아닙니다.")
         try:
             stab_rows = stability_assessment(results, stab_ppk, stab_ratio)
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("평가 항목", f"{len(stab_rows)}개")
-            m2.metric("능력 기준 미달", f"{sum(r['ppk'] < stab_ppk for r in stab_rows)}개")
+            m2.metric("Ppk 참고 기준 미달", f"{sum(r['ppk'] < stab_ppk for r in stab_rows)}개")
             m3.metric("변동 차이 확인 필요", f"{sum(r['ratio'] > stab_ratio for r in stab_rows)}개")
             m4.metric("평가 제외", f"{len(results) - len(stab_rows)}개")
             if stab_rows:
@@ -3775,17 +3726,17 @@ with tab_stab:
                 st.plotly_chart(fig_stab, use_container_width=True, key="stability_regions",
                                 config={"displaylogo": False})
             else:
-                st.info("평가 가능한 항목이 없습니다. 규격과 Cpk·Ppk 계산 결과를 확인하세요.")
+                st.info("평가 가능한 항목이 없습니다. 규격과 Cwk·Ppk 계산 결과를 확인하세요.")
             if len(stab_rows) < len(results):
-                st.caption("평가 제외: Ppk 또는 비율을 계산할 수 없는 항목입니다. Ppk가 0인 경우에도 비율은 정의되지 않습니다.")
+                st.caption("평가 제외: Ppk 또는 Cwk/Ppk 비율을 계산할 수 없는 항목입니다(n=1 포함). Ppk가 0인 경우에도 비율은 정의되지 않습니다.")
         except Exception as e:
             st.error(f"안정성 산점도 생성 실패: {e}")
         st.markdown("""
 **해석 가이드**
 - **녹색:** 능력 기준 충족 · 변동 차이 작음 / **노랑:** 능력 기준 충족 · 변동 차이 큼
 - **주황:** 능력 개선 필요 · 변동 차이 작음 / **빨강:** 능력 개선 필요 · 변동 차이 큼
-- 점에 마우스를 올리면 항목명과 Cpk·Ppk·비율을 확인할 수 있습니다. 화면 밖 항목은 **전체 보기**에서 확인하세요.
-- 비율 1은 장·단기 변동이 유사함을 뜻합니다. 1보다 크게 낮은 값은 부분군 구성과 변동 추정 방식을 확인하세요.
+- 점에 마우스를 올리면 항목명과 Cwk·Ppk·비율을 확인할 수 있습니다. 화면 밖 항목은 **전체 보기**에서 확인하세요.
+- 비율 1은 군내·전체 산포 추정값이 유사함을 뜻하며, 안정성의 증거가 아닙니다. 1보다 크게 낮은 값은 부분군 구성과 변동 추정 방식을 확인하세요.
 - 영역은 선택한 기준에 따른 보조 분류이며, 관리도 이상 신호의 유무를 대신하지 않습니다.
 """)
 
@@ -3940,131 +3891,15 @@ with tab_ctrl:
         except Exception:
             _n_subgroup = 0
         _r_lcl_applicable = not (_disp_kind == "R" and _n_subgroup <= 6)
-        _r_ucl_card = fmt_value(it.get('r_ucl', np.nan))
-        _r_lcl_card = fmt_value(it.get('r_lcl', np.nan)) if _r_lcl_applicable else "해당없음"
-
-        def _cp_alert_level(v) -> str:
-            try:
-                fv = float(v)
-            except Exception:
-                return "none"
-            if not np.isfinite(fv) or fv >= 1.33:
-                return "none"
-            if fv < 1.00:
-                return "bad"
-            return "warn"
-
-        def _fmt_ppm(v) -> str:
-            try:
-                fv = float(v)
-                if np.isfinite(fv):
-                    return f"{fv:,.0f}"
-            except Exception:
-                pass
-            return "—"
-
-        def _render_cp_metric(col, label: str, v, help_text: str, *, compact: bool = False):
-            lv = _cp_alert_level(v)
-            v_txt = fmt_value(v)
-            if lv == "none":
-                col.metric(label, v_txt, help=help_text)
-                return
-
-            _cls = "metric-hi-warn" if lv == "warn" else "metric-hi-bad"
-            _tag = "주의: 1.33 미달" if lv == "warn" else "불량: 1.00 미만"
-            _help_attr = str(help_text).replace('"', "&quot;")
-            _compact_cls = " metric-hi-compact" if compact else ""
-            col.markdown(
-                f"""
-                <div class="metric-hi{_compact_cls} {_cls}">
-                    <div class="metric-hi-label" title="{_help_attr}">{label}</div>
-                    <div class="metric-hi-value">{v_txt}</div>
-                    <div class="metric-hi-tag">{_tag}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        def _render_ppm_metric(col, label: str, ppm_v, ref_cp_v, help_text: str):
-            lv = _cp_alert_level(ref_cp_v)
-            v_txt = _fmt_ppm(ppm_v)
-            if lv == "none":
-                col.metric(label, v_txt, help=help_text)
-                return
-
-            _cls = "metric-hi-warn" if lv == "warn" else "metric-hi-bad"
-            _tag = "주의: 1.33 미달" if lv == "warn" else "불량: 1.00 미만"
-            _help_attr = str(help_text).replace('"', "&quot;")
-            col.markdown(
-                f"""
-                <div class="metric-hi metric-hi-compact {_cls}">
-                    <div class="metric-hi-label" title="{_help_attr}">{label}</div>
-                    <div class="metric-hi-value">{v_txt}</div>
-                    <div class="metric-hi-tag">{_tag}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        # 메트릭 (툴팁 포함, 3-4)
-        _core_cols = st.columns(7 if _r_lcl_applicable else 6)
-        _core_cols[0].metric(_lbl("평균 (μ)", "평균값"), fmt_value(it['mu']),
-                             help="데이터의 중심값입니다.")
-        _core_cols[1].metric(_lbl("σ (전체)", "전체 흔들림"), fmt_value(it['std_all']),
-                             help="장기간 전체 데이터의 흔들림(표준편차). 클수록 변동이 큽니다.")
-        _core_cols[2].metric(_lbl("σ (군내)", "단기 흔들림"), fmt_value(it['std_within']),
-                             help="같은 조건에서의 단기 변동. σ(전체)와 차이가 크면 공정이 불안정합니다.")
-        _core_cols[3].metric(_lbl("X-UCL", "X 관리상한"), fmt_value(it.get('ucl', np.nan)),
-                             help="X/Xbar 관리도의 관리상한선(UCL)입니다.")
-        _core_cols[4].metric(_lbl("X-LCL", "X 관리하한"), fmt_value(it.get('lcl', np.nan)),
-                             help="X/Xbar 관리도의 관리하한선(LCL)입니다.")
-        _core_cols[5].metric(
-            _lbl(f"{_disp_kind_label}-UCL", f"{_disp_kind} 관리상한"),
-            _r_ucl_card,
-            help=f"{_disp_kind_label} 관리도의 관리상한선(UCL)입니다."
-        )
-        if _r_lcl_applicable:
-            _core_cols[6].metric(
-                _lbl(f"{_disp_kind_label}-LCL", f"{_disp_kind} 관리하한"),
-                _r_lcl_card,
-                help=(
-                    f"{_disp_kind_label} 관리도의 관리하한선(LCL)입니다."
-                    if _disp_kind != "R" else
-                    "R(범위) 관리도의 관리하한선(LCL)입니다. n≤6에서는 정의상 생략됩니다."
-                ),
-            )
-
-        _cap_row1 = st.columns(4)
-        _render_cp_metric(
-            _cap_row1[0], _lbl("Cpk", "공정능력 지수") + (" (전처리 후)" if it.get('preprocess_applied') else ""), it.get('cpk', np.nan),
-            "규격 대비 공정 위치와 퍼짐을 반영한 지수. 1.33 이상이면 양호합니다.",
-            compact=True,
-        )
-        _render_ppm_metric(
-            _cap_row1[1], _lbl("PPM(Cpk)", "단기 예상 불량률"), it.get('ppm_cpk', np.nan), it.get('cpk', np.nan),
-            "Cpk 기준 σ(군내)로 산출한 예상 PPM(백만분율 불량)입니다."
-        )
-        _render_cp_metric(
-            _cap_row1[2], _lbl("Ppk", "장기 공정능력") + (" (전처리 후)" if it.get('preprocess_applied') else ""), it.get('ppk', np.nan),
-            "장기 전체 데이터 기준 공정능력. Cpk와 차이가 크면 공정이 불안정합니다.",
-            compact=True,
-        )
-        _render_ppm_metric(
-            _cap_row1[3], _lbl("PPM(Ppk)", "장기 예상 불량률"), it.get('ppm_ppk', np.nan), it.get('ppk', np.nan),
-            "Ppk 기준 σ(전체)로 산출한 예상 PPM(백만분율 불량)입니다."
-        )
-
-        _cap_row2 = st.columns(3)
-        _render_cp_metric(
-            _cap_row2[0], _lbl("Cpm", "목표치 반영 지수"), it.get('cpm', np.nan),
-            "목표치(T)를 반영한 공정능력 지수. 평균이 목표치에 가까울수록 높아집니다."
-        )
-        _render_cp_metric(
-            _cap_row2[1], _lbl("Cpmk", "목표+치우침 반영"), it.get('cpmk', np.nan),
-            "목표치(T)와 규격 한쪽 치우침을 함께 반영한 공정능력 지수입니다."
-        )
-        _cap_row2[2].metric(_lbl("안정성 (Cpk/Ppk)", "공정 안정성"), fmt_value(it['stab_ratio']),
-                            help="Cpk/Ppk 비율. 1에 가까울수록 단기·장기 변동이 일정하여 안정적입니다.")
+        if it.get('distribution_mode') == 'nonnormal':
+            _r_lcl_applicable = _n_subgroup > 1
+        st.markdown(process_metric_cards_html(it), unsafe_allow_html=True)
+        render_distribution_panel(it, save_config=_save_config)
+        with st.expander("계산 기준·분석 조건 안내", expanded=False):
+            st.caption(WITHIN_CAPABILITY_NOTICE)
+            st.caption(it.get('within_capability_note', '이전 분석 결과입니다. 재분석하면 Cw·Cwk를 확인할 수 있습니다.'))
+            st.caption("Cp·Cpk 적용 상태: " + it.get('capability_status', '재분석 필요') + " · " + "; ".join(it.get('capability_reasons', [])))
+            st.caption(it.get('performance_note', ''))
 
         _phase_label = str(it.get('control_phase_label', '해석용'))
         _phase_desc = str(it.get('limit_reference_desc', ''))
@@ -4263,7 +4098,7 @@ with tab_ctrl:
 
         # 상세 통계
         if st.checkbox("📊 상세 통계 보기", key="show_statistics"):
-            ppm_w, ppm_o, ppm_e = it['ppm_cpk'], it['ppm_ppk'], it['emp_ppm']
+            ppm_w, ppm_o, ppm_e = it.get('ppm_within', np.nan), it['ppm_ppk'], it['emp_ppm']
             _is_xmr = bool(it.get('is_xmr', False))
             _x_lab = "X" if _is_xmr else "Xbar"
             _disp_kind = str(it.get('dispersion_kind', "MR" if _is_xmr else "R"))
@@ -4273,6 +4108,8 @@ with tab_ctrl:
                 "MR": "MR(이동범위)",
             }.get(_disp_kind, _disp_kind)
             _disp_lcl_applicable = not (_disp_kind == "R" and int(it.get('n', 0)) <= 6)
+            if it.get('distribution_mode') == 'nonnormal':
+                _disp_lcl_applicable = int(it.get('n', 0)) > 1
             _ksq_c = it.get('ksq_counts', {})
             _norm_msg = str(it.get('norm_msg', '정규성 검정 결과 없음'))
             _n_valid = int(np.isfinite(np.asarray(it.get('series', []), dtype=float)).sum())
@@ -4365,6 +4202,10 @@ with tab_ctrl:
 
             _cpk_ci_lo, _cpk_ci_hi = _cap_ci_approx(it.get('cpk', np.nan), len(_series_vals))
             _ppk_ci_lo, _ppk_ci_hi = _cap_ci_approx(it.get('ppk', np.nan), len(_series_vals))
+            if it.get('distribution_mode') == 'nonnormal':
+                _cpk_ci_lo = _cpk_ci_hi = _ppk_ci_lo = _ppk_ci_hi = np.nan
+            if '만족' not in str(it.get('norm_msg', '')):
+                _ppk_ci_lo = _ppk_ci_hi = np.nan
 
             def _margin_level(v) -> str:
                 try:
@@ -4441,8 +4282,8 @@ with tab_ctrl:
 
             k1, k2, k3, k4, k5, k6 = st.columns(6)
             _kpis = [
-                ("Cpk", _num(it.get('cpk', np.nan)), "단기 공정능력", _cp_level(it.get('cpk', np.nan))),
-                ("Ppk", _num(it.get('ppk', np.nan)), "장기 공정능력", _cp_level(it.get('ppk', np.nan))),
+                ("Cpk", _num(it.get('cpk', np.nan)), "전체 변동 공정능력", _cp_level(it.get('cpk', np.nan))),
+                ("Ppk (참고)", _num(it.get('ppk', np.nan)), "선택 분포 모형", "muted"),
                 ("Cpm", _num(it.get('cpm', np.nan)), "목표치 반영", _cp_level(it.get('cpm', np.nan))),
                 ("Cpmk", _num(it.get('cpmk', np.nan)), "목표+치우침 반영", _cp_level(it.get('cpmk', np.nan))),
                 ("PPM(Overall)", _ppm(ppm_o), "100만개 기준", _ppm_level(ppm_o)),
@@ -4470,6 +4311,7 @@ with tab_ctrl:
                 ("목표치(T)", _num(it.get('target', np.nan)), "muted"),
                 ("운영 모드", str(it.get('control_phase_label', '해석용')), "muted"),
                 ("Cp / Cpk", f"{_num(it.get('cp', np.nan))} / {_num(it.get('cpk', np.nan))}", _cpk_cls),
+                ("Cw / Cwk (진단용)", f"{_num(it.get('cw', np.nan))} / {_num(it.get('cwk', np.nan))}", "muted"),
                 ("Pp / Ppk", f"{_num(it.get('pp', np.nan))} / {_num(it.get('ppk', np.nan))}", _ppk_cls),
                 ("Cpm / Cpmk", f"{_num(it.get('cpm', np.nan))} / {_num(it.get('cpmk', np.nan))}", _cpmk_cls),
             ]
@@ -4539,7 +4381,10 @@ with tab_ctrl:
 
             _ksq_total = sum(int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9))
             _ksq_df = pd.DataFrame([{f'T{j}': int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9)}], index=["위반 건수"])
-            st.markdown("**KSQ 규칙 진단 매트릭스 (T1~T8)**")
+            if it.get('distribution_mode') == 'nonnormal':
+                st.caption(it.get('pearson_rules_note', ''))
+                _ksq_df = _ksq_df[['T1']]
+            st.markdown("**관리한계 이탈 진단 (T1)**" if it.get('distribution_mode') == 'nonnormal' else "**KSQ 규칙 진단 매트릭스 (T1~T8)**")
             try:
                 _ksq_styled = _ksq_df.style.applymap(
                     lambda v: (

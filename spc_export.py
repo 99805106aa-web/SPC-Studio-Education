@@ -8,6 +8,7 @@ Excel / PDF 내보내기 모듈
 
 import io
 from spc_access import day_guard
+from spc_core import WITHIN_CAPABILITY_NOTICE, assess_process, fmt_ppm
 import math
 import base64
 import numpy as np
@@ -27,6 +28,10 @@ SUMMARY_HIDDEN_COLUMNS = {
     "기준구간사유",
     "능력기준",
     "비고",
+    "성능 해석 안내",
+    "능력 적용 사유",
+    "분포 모드", "기준분포 상태", "성능분포 상태",
+    *{f'{name}.{method}' for name in ('Cp', 'Cpk', 'Pp', 'Ppk') for method in ('G', 'Z')},
 }
 
 
@@ -87,8 +92,8 @@ def _summary_visible_df(summary_df: pd.DataFrame) -> pd.DataFrame:
             summary_df["신뢰도"] = combined
         else:
             summary_df.insert(insert_at, "신뢰도", combined)
-    if "안정성(Cpk/Ppk)" in summary_df.columns:
-        summary_df = summary_df.rename(columns={"안정성(Cpk/Ppk)": "안정성"})
+    if "군내/전체 지수 비율(Cwk/Ppk)" in summary_df.columns:
+        summary_df = summary_df.rename(columns={"군내/전체 지수 비율(Cwk/Ppk)": "군내/전체 지수 비율"})
     drop_cols = [c for c in SUMMARY_HIDDEN_COLUMNS if c in summary_df.columns]
     return summary_df.drop(columns=drop_cols) if drop_cols else summary_df
 
@@ -113,6 +118,8 @@ def _report_fmt_value(v, d: int = 3) -> str:
     if isinstance(v, (int, np.integer)):
         return f"{int(v):,}"
     if isinstance(v, (float, np.floating)):
+        if np.isinf(v):
+            return '∞' if v > 0 else '−∞'
         if not np.isfinite(v):
             return "—"
         return f"{float(v):.{d}f}"
@@ -120,18 +127,7 @@ def _report_fmt_value(v, d: int = 3) -> str:
 
 
 def _report_fmt_ppm_int(v) -> str:
-    if v is None:
-        return "—"
-    try:
-        if isinstance(v, str):
-            fv = float(v.replace(",", "").strip())
-        else:
-            fv = float(v)
-    except Exception:
-        return "—"
-    if not np.isfinite(fv):
-        return "—"
-    return f"{int(fv):,}"
+    return fmt_ppm(v)
 
 
 def _report_metric_cls(v) -> str:
@@ -150,7 +146,7 @@ def _report_metric_cls(v) -> str:
 
 def _report_summary_spec(summary_df: pd.DataFrame):
     df = _summary_visible_df(summary_df).copy()
-    cap_cols = [c for c in ["Cp", "Cpk", "Pp", "Ppk", "Cpm", "Cpmk"] if c in df.columns]
+    cap_cols = [c for c in ["Cp", "Cpk", "Cpm", "Cpmk"] if c in df.columns]
     ppm_cols = [c for c in df.columns if "PPM" in str(c)]
     cnt_cols = [c for c in df.columns if ("이탈" in str(c) or "위반" in str(c))]
     return df, cap_cols, ppm_cols, cnt_cols
@@ -201,25 +197,28 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         n_subgroup = 0
     r_lcl_applicable = not (disp_kind_raw == "R" and n_subgroup <= 6)
+    if it.get('distribution_mode') == 'nonnormal':
+        r_lcl_applicable = n_subgroup > 1
 
     cpk = it.get("cpk", np.nan)
     spec_v = int(it.get("spec_violation_count", 0))
     ctrl_v = int(it.get("x_ctrl_violation_count", 0) + it.get("r_ctrl_violation_count", 0))
-    risk_cls = (
-        "bad"
-        if (ctrl_v > 0 or spec_v > 0 or _report_metric_cls(cpk) == "bad")
-        else ("warn" if _report_metric_cls(cpk) == "warn" else "good")
-    )
+    assessment = assess_process(it)
+    risk_cls = {"high": "bad", "medium": "warn", "unknown": "warn", "low": "good"}[assessment['level']]
+    if risk_cls == 'good' and it.get('capability_status') != '적용 가능':
+        risk_cls = 'warn'
 
     ppk = it.get("ppk", np.nan)
     metric_items = [
         ("N", _report_fmt_value(len(it.get("series", [])), 0), ""),
-        ("Cpk", _report_fmt_value(cpk), _report_metric_cls(cpk)),
-        ("PPM(Cpk)", _report_fmt_ppm_int(it.get("ppm_cpk", np.nan)), _report_metric_cls(cpk)),
-        ("Ppk", _report_fmt_value(ppk), _report_metric_cls(ppk)),
-        ("PPM(Ppk)", _report_fmt_ppm_int(it.get("ppm_ppk", np.nan)), _report_metric_cls(ppk)),
+        ("Cpk", _report_fmt_value(cpk) if not np.isnan(cpk) else str(it.get("capability_status", "재분석 필요")), _report_metric_cls(cpk)),
+        ("PPM(Cwk, 진단용)", _report_fmt_ppm_int(it.get("ppm_within", np.nan)), ""),
+        ("Ppk (모델 참고)", _report_fmt_value(ppk), ""),
+        ("PPM(Ppk, 모델 참고)", _report_fmt_ppm_int(it.get("ppm_ppk", np.nan)), ""),
         ("Cpm", _report_fmt_value(it.get("cpm", np.nan)), _report_metric_cls(it.get("cpm", np.nan))),
         ("Cpmk", _report_fmt_value(it.get("cpmk", np.nan)), _report_metric_cls(it.get("cpmk", np.nan))),
+        ("Cw (진단용)", _report_fmt_value(it.get("cw", np.nan)), ""),
+        ("Cwk (진단용)", _report_fmt_value(it.get("cwk", np.nan)), ""),
         ("규격 이탈", f"{spec_v:,}", "bad" if spec_v > 0 else "good"),
         ("관리 이탈", f"{ctrl_v:,}", "bad" if ctrl_v > 0 else "good"),
         ("USL", _report_fmt_value(it.get("usl", np.nan)), ""),
@@ -232,11 +231,27 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
     if r_lcl_applicable:
         metric_items.append((f"{disp_kind_raw}-LCL", _report_fmt_value(it.get("r_lcl", np.nan)), ""))
 
+    performance_note = str(it.get('performance_note', '이전 결과: 재분석 필요'))
+    if it.get('distribution_mode') == 'nonnormal':
+        method = it.get('capability_method', 'G')
+        metric_items = [(key + '.' + method if key in ('Cpk', 'Ppk (모델 참고)') else key, val, cls)
+                        for key, val, cls in metric_items]
+        model = it.get('distribution_model') or it.get('chart_model') or {}
+        params_text = ', '.join(f'{value:.6g}' for value in model.get('params', []))
+        model_note = f"분포 {model.get('name', '미확인')} · 모수 [{params_text}] · 적합 N {model.get('fit_n', '—')} / 검정 N {model.get('test_n', '—')} · AD p={model.get('pvalue', '—')}"
+        model_note += f" · 기준 {it.get('limit_reference_label')} · 한계 모의 {it.get('simulation_samples', 0):,} / seed {it.get('seed', '—')} · 자연하한 {(it.get('distribution_settings') or {}).get('natural_lower')}"
+        comparisons = ' / '.join(f"{m}: Cp={_report_fmt_value(v['cp'])}, Cpk={_report_fmt_value(v['cpk'])}, Pp={_report_fmt_value(v['pp'])}, Ppk={_report_fmt_value(v['ppk'])}"
+                                 for m, v in it.get('capability_methods', {}).items())
+        performance_note += ' ' + model_note + ' · ' + comparisons + ' · ' + it.get('pearson_rules_note', '')
+
     return {
         "column": str(it.get("column", "")),
         "risk_cls": risk_cls,
         "risk_label": {"bad": "위험", "warn": "주의", "good": "양호"}[risk_cls],
         "norm_msg": str(it.get("norm_msg", "")),
+        "within_note": str(it.get("within_capability_note", "이전 분석 결과: 재분석 필요")),
+        "capability_note": str(it.get("capability_status", "재분석 필요")) + ": " + "; ".join(it.get("capability_reasons", [])),
+        "performance_note": performance_note,
         "metric_items": metric_items,
     }
 
@@ -301,7 +316,7 @@ def export_summary_excel(
             or n.startswith("KSQ T")
         )
 
-    capability_names = {"Cp", "Cpk", "Pp", "Ppk", "Cpm", "Cpmk"}
+    capability_names = {"Cp", "Cpk", "Cpm", "Cpmk"}
 
     def _style_value_cell(cell, col_name: str):
         v = cell.value
@@ -393,6 +408,10 @@ def export_summary_excel(
     summary_export_df = _summary_visible_df(summary_df)
     headers = list(summary_export_df.columns)
     ws.append(headers)
+    from openpyxl.comments import Comment
+    for label in ("Cw", "Cwk"):
+        if label in headers:
+            ws.cell(1, headers.index(label) + 1).comment = Comment(WITHIN_CAPABILITY_NOTICE, "SPC")
     for col_idx in range(1, len(headers) + 1):
         c = ws.cell(row=1, column=col_idx)
         c.fill = header_fill
@@ -452,7 +471,7 @@ def export_summary_excel(
     ws2 = wb.create_sheet("변수별 상세")
     detail_headers = [
         "변수", "N", "원본N", "분석N", "신뢰도 상태", "신뢰도 사유", "평균", "원본평균", "σ(단기)", "σ(전체)", "원본σ(전체)",
-        "Cp", "Cpk", "PPM(Within)", "Pp", "Ppk", "PPM(Overall)", "Cpm", "Cpmk", "안정성(Cpk/Ppk)",
+        "Cp", "Cpk", "PPM(Within)", "Pp", "Ppk", "PPM(Overall)", "Cpm", "Cpmk", "군내/전체 지수 비율(Cwk/Ppk)",
         "PPM(실측)",
         "USL", "LSL", "목표치(T)", "원본USL", "원본LSL", "원본목표치(T)", "능력기준",
         "X-CL", "X-UCL", "X-LCL",
@@ -460,6 +479,7 @@ def export_summary_excel(
         "X관리이탈", "산포관리이탈", "규격이탈",
         "기준구간상태", "기준구간사유", "이상치제거", "정규성",
         "KSQ T1", "KSQ T2", "KSQ T3", "KSQ T4", "KSQ T5", "KSQ T6", "KSQ T7", "KSQ T8",
+        "Cw", "Cwk", "군내 능력 설명", "능력 적용 상태", "능력 적용 사유", "성능 해석 안내",
     ]
     ws2.append(detail_headers)
     for col_idx in range(1, len(detail_headers) + 1):
@@ -489,13 +509,13 @@ def export_summary_excel(
             _f(it.get("original_std_all")),
             _f(it.get("cp")),
             _f(it.get("cpk")),
-            _f(it.get("ppm_cpk")),
+            _f(it.get("ppm_within")),
             _f(it.get("pp")),
             _f(it.get("ppk")),
             _f(it.get("ppm_ppk")),
             _f(it.get("cpm")),
             _f(it.get("cpmk")),
-            _f(it.get("stab_ratio")),
+            _f(it.get("within_overall_ratio")),
             _f(it.get("emp_ppm")),
             _f(it.get("usl")),
             _f(it.get("lsl")),
@@ -526,11 +546,17 @@ def export_summary_excel(
             int(ksq_c.get("T6", 0)),
             int(ksq_c.get("T7", 0)),
             int(ksq_c.get("T8", 0)),
+            _f(it.get("cw")),
+            _f(it.get("cwk")),
+            WITHIN_CAPABILITY_NOTICE + " " + str(it.get("within_capability_note", "이전 분석 결과: 재분석 필요")),
+            str(it.get("capability_status", "재분석 필요")),
+            "; ".join(it.get("capability_reasons", [])),
+            str(it.get("performance_note", "이전 결과: 재분석 필요")),
         ]
         ws2.append(row)
 
     detail_int_cols = {"N", "원본N", "분석N", "X관리이탈", "산포관리이탈", "규격이탈", "이상치제거", "KSQ T1", "KSQ T2", "KSQ T3", "KSQ T4", "KSQ T5", "KSQ T6", "KSQ T7", "KSQ T8"}
-    detail_text_cols = {"변수", "신뢰도 상태", "신뢰도 사유", "산포관리도", "능력기준", "기준구간상태", "기준구간사유", "정규성"}
+    detail_text_cols = {"변수", "신뢰도 상태", "신뢰도 사유", "산포관리도", "능력기준", "기준구간상태", "기준구간사유", "정규성", "군내 능력 설명", "능력 적용 상태", "능력 적용 사유", "성능 해석 안내"}
 
     for row_idx in range(2, ws2.max_row + 1):
         for col_idx, col_name in enumerate(detail_headers, 1):
@@ -543,6 +569,34 @@ def export_summary_excel(
 
     ws2.freeze_panes = "A2"
     _auto_width(ws2, max_width=24)
+
+    ws_note = wb.create_sheet("군내 능력 안내")
+    ws_note.append(["항목", "설명"])
+    ws_note.append(["Cw·Cwk", WITHIN_CAPABILITY_NOTICE])
+    ws_note.append(["계산식", "Cw=(USL−LSL)/(6σw); Cwk=min((USL−평균)/(3σw), (평균−LSL)/(3σw))"])
+    ws_note.append(["적용", "n≥2. Cw는 양측 규격, Cwk는 최소 한쪽 규격이 필요합니다."])
+    ws_note.append(["추정 방법", "2≤n≤9: R̄/d₂; n≥10: s̄/c₄. 기존 분석의 전처리·변환·기준구간을 적용합니다."])
+    ws_note.column_dimensions['A'].width = 18
+    ws_note.column_dimensions['B'].width = 90
+    for row in ws_note.iter_rows():
+        row[1].alignment = Alignment(wrap_text=True, vertical="top")
+        ws_note.row_dimensions[row[0].row].height = 48
+
+    nonlinear = [it for it in results if it.get('distribution_mode') == 'nonnormal']
+    if nonlinear:
+        import json
+        ws_model = wb.create_sheet('분포·GZ')
+        ws_model.append(['변수', '항목', '값'])
+        for it in nonlinear:
+            keys = ('capability_method', 'distribution_settings', 'chart_model', 'distribution_model',
+                    'chart_fit_status', 'performance_fit_status', 'capability_methods', 'capability_quantiles',
+                    'numeric_status', 'effective_rules', 'pearson_rules_note', 'simulation_samples', 'seed')
+            for key in keys:
+                value = it.get(key)
+                ws_model.append([str(it['column']), key,
+                                 json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, (dict, list)) else value])
+        ws_model.freeze_panes = 'A2'
+        _auto_width(ws_model, max_width=100)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -597,6 +651,9 @@ def export_analysis_html(
         col = escape(detail["column"])
         risk_cls = detail["risk_cls"]
         norm_msg = escape(detail["norm_msg"])
+        within_note = escape(detail["within_note"])
+        capability_note = escape(detail["capability_note"])
+        performance_note = escape(detail["performance_note"])
 
         metric_cards = []
         for key, val, cls in detail["metric_items"]:
@@ -669,7 +726,11 @@ def export_analysis_html(
 
         detail_html.append(
             f"<section class='var'>"
+            f"<div class='var-heading'>"
             f"<div class='var-head'><h3>{col}</h3><span class='pill {risk_cls}'>{detail['risk_label']}</span></div>"
+            f"<div class='norm'>Cp·Cpk: {capability_note}</div>"
+            f"<div class='norm'>Cw·Cwk (진단용): {within_note}</div>"
+            f"<div class='norm'>{performance_note}</div></div>"
             f"<div class='var-main'>"
             f"<div class='var-side'>{metrics_html}</div>"
             f"<div class='var-chart'>{chart_main_html if chart_main_html else '<div class=\"chart-empty\">차트 없음</div>'}</div>"
@@ -985,9 +1046,9 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
     page-break-inside: avoid;
     margin-top: 0;
     padding: 3mm;
-    height: calc(var(--a4-landscape-h) - (var(--print-margin) * 2));
-    display: flex;
-    flex-direction: column;
+    height: calc(var(--a4-landscape-h) - (var(--print-margin) * 2) - 1mm);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
     gap: 2mm;
     box-sizing: border-box;
     border: 1pt solid #1e293b !important;
@@ -1021,14 +1082,14 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
   }}
   .metrics {{
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 2mm;
+    gap: 1mm;
     margin-bottom: 2mm;
   }}
   .meta-metrics {{
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }}
   .metric {{
-    padding: 2mm;
+    padding: 1mm;
     border: 0.8pt solid #334155 !important;
     background: #fff !important;
   }}
@@ -1038,6 +1099,7 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
   .side-chart {{
     flex: 1 1 auto;
     min-height: 0;
+    height: 0;
     margin-top: 2mm;
     display: flex;
   }}
@@ -1085,6 +1147,7 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
   </header>
   <section class="card print-summary">
     <h2>선별 요약</h2>
+    <p class="norm">{escape(WITHIN_CAPABILITY_NOTICE)}</p>
     <div class="summary-wrap">{summary_table_html}</div>
   </section>
   <section class="print-details">

@@ -47,7 +47,14 @@ _d2_mr = 1.128  # I-MR에서 MRbar→σ 변환
 NORMALITY_MAX = 10000
 NORMALITY_SW_CUTOFF = 50  # n<=50: Shapiro-Wilk, 초과: Anderson-Darling
 
-CALCULATION_VERSION = "2026.09.26.2"
+CALCULATION_VERSION = "2026.11.17.2"
+WITHIN_CAPABILITY_NOTICE = (
+    "Cw·Cwk는 군내 변동에 기반한 공정 진단 지수입니다. "
+    "이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않습니다. "
+    "합리적 부분군과 군내 정규성을 가정합니다. Cp·Cpk와 Pp·Ppk는 전체 변동을 사용하며, "
+    "Cp·Cpk는 관측 구간의 적용 조건이 충족될 때만 표시합니다. "
+    "Cwk/Ppk 비율만으로 공정 안정성을 확정할 수 없습니다."
+)
 OUTLIER_METHOD_IQR = "iqr"
 OUTLIER_METHOD_QUANTILE = "quantile"
 
@@ -96,6 +103,7 @@ def analysis_options(state) -> Dict[str, Any]:
                     preprocess_outliers=False, box_cox_transform=False)
     options = {key: state.get(key, default) for key, default in defaults.items()}
     options["outlier_method"] = normalize_outlier_method(state.get("outlier_method", OUTLIER_METHOD_IQR))
+    options["distribution_settings"] = state.get("distribution_settings", {})
     options["manual_target_map"] = state.get("manual_target_map", {}) if state.get("manual_target_enabled", False) else None
     return options
 
@@ -112,6 +120,8 @@ def assess_process(it: Dict[str, Any]) -> Dict[str, str]:
         return dict(level="high", text="🔴 공정 안정성 검토 필요", action="관리이탈·규칙 위반의 발생 시점과 작업 조건을 확인하세요. 능력 지수만으로 정상 운영을 판정하지 않습니다.")
     if it.get("reliability_status") in ("검토필요", "주의"):
         return dict(level="medium", text="🟡 분석 조건 검토 필요", action="정규성·규격·전처리 및 제외 데이터 사유를 먼저 확인하세요.")
+    if it.get("capability_status") and it.get("capability_status") != "적용 가능":
+        return dict(level="medium", text="🟡 공정능력 적용 조건 확인", action="; ".join(it.get("capability_reasons", [])))
     cpk = it.get("cpk", np.nan)
     if not np.isfinite(cpk):
         return dict(level="unknown", text="⬜ 능력 판정 불가", action="규격과 유효 표본을 확인하세요.")
@@ -174,8 +184,10 @@ def get_s_chart_constants(n: int) -> Tuple[float, float, float, float]:
         return np.nan, np.nan, np.nan, np.nan
 
 
-def _ad_pvalue_from_A2(A2: float) -> float:
+def _ad_pvalue_from_A2(A2: float, n: Optional[int] = None) -> float:
     """Anderson-Darling A2 통계량으로 근사 p-value 계산 (Stephens/Thode 스타일)."""
+    if n is not None:
+        A2 *= 1.0 + 0.75/n + 2.25/(n*n)
     if A2 < 0.2:
         p = 1.0 - math.exp(-13.436 + 101.14 * A2 - 223.73 * (A2 ** 2))
     elif A2 < 0.34:
@@ -189,6 +201,16 @@ def _ad_pvalue_from_A2(A2: float) -> float:
     return float(max(0.0, min(1.0, p)))
 
 
+def _normality_sample(arr: np.ndarray, limit: int = NORMALITY_MAX) -> np.ndarray:
+    """Reproducible sample from the whole observation interval, not its prefix."""
+    arr = np.asarray(arr, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size > limit:
+        indices = np.random.default_rng(20261117).choice(arr.size, limit, replace=False)
+        arr = arr[np.sort(indices)]
+    return arr
+
+
 def normality_message(arr: np.ndarray, alpha: float = 0.05) -> str:
     """
     정규성 검정 결과 문자열 반환.
@@ -196,8 +218,10 @@ def normality_message(arr: np.ndarray, alpha: float = 0.05) -> str:
     - n > 50: Anderson-Darling (p 근사)
     """
     arr = np.asarray(arr, dtype=float)
-    arr = arr[np.isfinite(arr)]
+    total_n = int(np.isfinite(arr).sum())
+    arr = _normality_sample(arr)
     n = arr.size
+    sample_note = f" · 검정 표본 {n:,}/전체 {total_n:,}" if n < total_n else ""
     if n < 3:
         return f"정규성 검정 불가 (유효 표본수 {n} < 3)"
     if np.nanstd(arr) == 0.0:
@@ -215,12 +239,14 @@ def normality_message(arr: np.ndarray, alpha: float = 0.05) -> str:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             ad = stats.anderson(arr, dist='norm')
-        p = _ad_pvalue_from_A2(float(ad.statistic))
-        return f"P-값 = {p:.3f} ({'만족' if p >= alpha else '의심'}) [Anderson-Darling]"
+        p = _ad_pvalue_from_A2(float(ad.statistic), n)
+        return f"P-값 = {p:.3f} ({'만족' if p >= alpha else '의심'}) [Anderson-Darling]{sample_note}"
     except Exception:
         try:
-            _, p = stats.shapiro(arr[:5000])
-            return f"P-값 = {p:.3f} ({'만족' if p >= alpha else '의심'}) [Shapiro-Wilk fallback]"
+            sample = _normality_sample(arr, 5000)
+            _, p = stats.shapiro(sample)
+            return (f"P-값 = {p:.3f} ({'만족' if p >= alpha else '의심'}) [Shapiro-Wilk fallback]"
+                    + (f" · 검정 표본 {len(sample):,}/전체 {total_n:,}" if len(sample) < total_n else ""))
         except Exception as e2:
             return f"정규성 검정 불가 (예외: {e2.__class__.__name__})"
 
@@ -249,7 +275,7 @@ def qq_stats_text(arr: np.ndarray) -> str:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             ad = stats.anderson(a, dist='norm')
-        ad_txt = f"{_ad_pvalue_from_A2(float(ad.statistic)):.3f}"
+        ad_txt = f"{_ad_pvalue_from_A2(float(ad.statistic), a.size):.3f}"
     except Exception:
         pass
 
@@ -350,6 +376,17 @@ def fmt_value(v, decimals: int = 3, comma: bool = False) -> str:
         return f"{v:.{decimals}f}"
     except Exception:
         return str(v)
+
+
+def fmt_ppm(v) -> str:
+    """Display only: do not round the probability used by indices or APIs."""
+    try:
+        value = float(str(v).replace(',', ''))
+    except (ValueError, TypeError):
+        return '—'
+    if not np.isfinite(value):
+        return '—'
+    return '0' if value < .001 else f'{value:,.3f}'
 
 
 def fmt_spec(v) -> str:
@@ -652,6 +689,7 @@ def analyze_column(
     sample_labels: Optional[List[str]] = None,
     outlier_method: str = OUTLIER_METHOD_IQR,
     detail_level: str = "full",
+    distribution_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     단일 컬럼에 대한 SPC + 공정능력 전체 분석.
@@ -664,6 +702,10 @@ def analyze_column(
         raise ValueError("시료 크기 n은 1 이상의 정수여야 합니다.")
     if detail_level not in ('core', 'full'):
         raise ValueError('detail_level은 core 또는 full이어야 합니다.')
+    from spc_nonnormal import validate_settings
+    distribution_config = validate_settings(distribution_config or {})
+    if distribution_config['mode'] == 'nonnormal' and (preprocess_outliers or box_cox_transform):
+        raise ValueError('비정규 모드에서는 자동 이상치 제거·Box-Cox를 끄고 다시 분석하세요.')
     if np.isfinite(usl) and np.isfinite(lsl) and usl <= lsl:
         raise ValueError("규격 상한 USL은 규격 하한 LSL보다 커야 합니다.")
     if any(np.isinf(v) for v in (usl, lsl, target)):
@@ -938,17 +980,8 @@ def analyze_column(
         target_eff = target if np.isfinite(target) else (
             (usl + lsl) / 2.0 if np.isfinite(usl) and np.isfinite(lsl) else np.nan
         )
-        cp = safe_div(span, 6 * sigma_within)
-
-        cpk = np.nan
-        if np.isfinite(sigma_within) and sigma_within > 0:
-            cands = []
-            if np.isfinite(usl):
-                cands.append((usl - mu) / (3 * sigma_within))
-            if np.isfinite(lsl):
-                cands.append((mu - lsl) / (3 * sigma_within))
-            if cands:
-                cpk = min(cands)
+        # Cp/Cpk are assigned from the overall estimates only after eligibility checks.
+        cp = cpk = np.nan
 
         pp = safe_div(span, 6 * std_all)
 
@@ -978,15 +1011,49 @@ def analyze_column(
             if cands:
                 cpmk = min(cands)
 
-        stab_ratio = abs(cpk / ppk) if (np.isfinite(ppk) and np.isfinite(cpk) and ppk != 0) else np.nan
-
         # PPM
-        ppm_cpk = ppm_by_sigma(mu, sigma_within, usl, lsl)
+        ppm_cpk = np.nan
         ppm_ppk = ppm_by_sigma(mu, std_all, usl, lsl)
 
     else:
         cp = cpk = pp = ppk = cpm = cpmk = stab_ratio = ppm_cpk = ppm_ppk = np.nan
         target_eff = target if np.isfinite(target) else ((usl + lsl) / 2 if np.isfinite(usl) and np.isfinite(lsl) else np.nan)
+
+    # Compute within capability independently of overall capability eligibility.
+    cw = cwk = ppm_within = np.nan
+    within_notes = []
+    if n == 1:
+        within_notes.append("n=1은 부분군 내 산포를 정의할 수 없어 Cw·Cwk 계산 제외")
+    else:
+        within_notes.append("σw 추정: " + ("s̄/c₄" if use_s_chart else "R̄/d₂"))
+        if detail_level != "full":
+            within_notes.append("상세(full) 분석에서 계산")
+        elif capability_unavailable:
+            within_notes.append("규격 변환 불가로 Cw·Cwk 계산 제외")
+        elif not np.isfinite(sigma_within) or sigma_within <= 0:
+            within_notes.append("군내 산포가 0이거나 유효하지 않아 Cw·Cwk 계산 제외")
+        else:
+            cw = safe_div(usl - lsl, 6 * sigma_within)
+            distances = []
+            if np.isfinite(usl):
+                distances.append(usl - mu)
+            if np.isfinite(lsl):
+                distances.append(mu - lsl)
+            if distances:
+                cwk = min(distances) / (3 * sigma_within)
+            ppm_within = ppm_by_sigma(mu, sigma_within, usl, lsl)
+            if not (np.isfinite(usl) and np.isfinite(lsl)):
+                within_notes.append("Cw는 양측 규격 필요")
+            if not (np.isfinite(usl) or np.isfinite(lsl)):
+                within_notes.append("Cwk는 최소 한쪽 규격 필요")
+        within_notes.append(f"산포 기준: {limit_reference_label}; 평균 기준: 전체 분석 데이터")
+        if outlier_info.get("count", 0) > 0 or box_cox_applied:
+            within_notes.append("전처리/변환 후 데이터 및 규격 기준")
+    within_capability_note = "; ".join(within_notes)
+    within_overall_ratio = (
+        abs(cwk / ppk) if np.isfinite(cwk) and np.isfinite(ppk) and ppk != 0 else np.nan
+    )
+    stab_ratio = within_overall_ratio  # compatibility alias; now |Cwk/Ppk|
 
     # 실측 불량은 전처리/변환 전의 원본과 원본 규격으로 판정한다.
     emp_ppm = np.nan
@@ -1025,8 +1092,7 @@ def analyze_column(
 
     # 정규성 검정
     try:
-        x_for_test = series_all if len(series_all) <= NORMALITY_MAX else series_all[:NORMALITY_MAX]
-        norm_msg = normality_message(np.asarray(x_for_test, dtype=float)) if detail_level == "full" else "상세 통계 실행 전"
+        norm_msg = normality_message(series_all) if detail_level == "full" else "상세 통계 실행 전"
     except Exception:
         norm_msg = "정규성 검정 불가"
 
@@ -1102,7 +1168,57 @@ def analyze_column(
         "preprocess_applied": preprocess_applied,
     })
 
-    return dict(
+    capability_reasons = []
+    if detail_level != "full":
+        capability_status = "미평가"
+        capability_reasons.append("상세(full) 분석에서 평가")
+    elif capability_unavailable or not has_spec or not np.isfinite(std_all) or std_all <= 0:
+        capability_status = "계산불가"
+        if capability_unavailable:
+            capability_reasons.append("규격 변환 불가")
+        if not has_spec:
+            capability_reasons.append("규격없음")
+        if not np.isfinite(std_all) or std_all <= 0:
+            capability_reasons.append("전체 산포가 0이거나 유효하지 않음")
+    else:
+        if x_ctrl_violation_count + r_ctrl_violation_count > 0 or any(ksq_counts.values()):
+            capability_reasons.append("공정불안정: 관리이탈 또는 활성 KSQ 규칙 위반")
+        if baseline_unstable:
+            capability_reasons.append("관리용 기준구간 부적합")
+        if normality_suspect:
+            capability_reasons.append("비정규 의심: 분포 모델 검토 필요")
+        elif "만족" not in norm_msg:
+            capability_reasons.append("정규성 확인 불가")
+        if x_ctrl_violation_count + r_ctrl_violation_count > 0 or any(ksq_counts.values()) or baseline_unstable:
+            capability_status = "관리상태 확인"
+        elif normality_suspect:
+            capability_status = "분포 검토 필요"
+        elif "만족" not in norm_msg:
+            capability_status = "정규성 확인 필요"
+        else:
+            capability_status = "적용 가능"
+        if capability_status == "적용 가능":
+            cp, cpk, ppm_cpk = pp, ppk, ppm_ppk
+            if not (np.isfinite(usl) and np.isfinite(lsl)):
+                capability_reasons.append("Cp는 양측 규격 필요; Cpk만 적용 가능")
+    performance_note = (
+        "Pp·Ppk 및 예상 PPM은 전체 데이터의 정규모델 가정 참고값입니다. "
+        "관측 구간의 적용 조건 충족은 공식 공정능력 입증을 의미하지 않습니다."
+    )
+    if normality_suspect or "만족" not in norm_msg:
+        performance_note += " 비정규 의심 또는 정규성 미확인: 모델 검토 전 능력 판정에 사용하지 마세요."
+        within_capability_note += "; 군내 정규성은 별도 확인 필요"
+
+    result = dict(
+        calculation_version=CALCULATION_VERSION,
+        distribution_mode='normal',
+        capability_method='normal',
+        capability_methods={},
+        capability_status=capability_status,
+        capability_reasons=capability_reasons,
+        performance_note=performance_note,
+        within_overall_ratio=within_overall_ratio,
+        ppm_within=ppm_within,
         detail_level=detail_level,
         column=col,
         original_series=original_series,
@@ -1135,6 +1251,9 @@ def analyze_column(
         ppk=ppk,
         cpm=cpm,
         cpmk=cpmk,
+        cw=cw,
+        cwk=cwk,
+        within_capability_note=within_capability_note,
         ppm_cpk=ppm_cpk,
         ppm_ppk=ppm_ppk,
         emp_ppm=emp_ppm,
@@ -1203,6 +1322,10 @@ def analyze_column(
         reliability_reasons=reliability_reasons,
         reliability_reason_text=", ".join(reliability_reasons),
     )
+    if distribution_config['mode'] == 'nonnormal':
+        from spc_nonnormal import apply_analysis
+        result = apply_analysis(result, distribution_config)
+    return result
 
 
 def _excel_engine(path_or_bytes, head: bytes = b'') -> str:
@@ -1337,7 +1460,7 @@ def load_spec_df(path_or_bytes, sheet_name=None) -> Dict[str, Tuple[float, float
             usl_idx = 1 if len(df.columns) > 1 else None
         if lsl_idx is None and not has_named_limit:
             lsl_idx = 2 if len(df.columns) > 2 else None
-        if target_idx is None:
+        if target_idx is None and not has_named_limit:
             target_idx = 3 if len(df.columns) > 3 else None
 
         for _, row in df.iterrows():
@@ -1351,6 +1474,8 @@ def load_spec_df(path_or_bytes, sheet_name=None) -> Dict[str, Tuple[float, float
             key = key.strip()
             if not key or key.lower() in ('nan', 'none', ''):
                 continue
+            if key in spec_map:
+                raise ValueError(f"{key}: 규격 항목이 중복되었습니다. 항목별 규격을 하나로 정리하세요.")
             def spec_number(idx, name):
                 value = row.iloc[idx] if idx is not None else np.nan
                 if pd.isna(value) or not str(value).strip():
@@ -1395,12 +1520,16 @@ def run_full_analysis(
     detail_level: str = "full",
     selected_columns: Optional[List[str]] = None,
     progress_callback=None,
+    distribution_settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict], pd.DataFrame]:
     """
     전체 분석 실행.
     반환: (results_list, summary_df)
     """
-    settings = dict(detail_level=detail_level, selected_columns=selected_columns, data_sheet=data_sheet, spec_sheet=spec_sheet, n=n,
+    from spc_nonnormal import MODEL_VERSION, normalize_settings_map
+    distribution_settings = normalize_settings_map(distribution_settings)
+    settings = dict(distribution_settings=distribution_settings, distribution_model_version=MODEL_VERSION,
+                    detail_level=detail_level, selected_columns=selected_columns, data_sheet=data_sheet, spec_sheet=spec_sheet, n=n,
                     include_incomplete=include_incomplete, data_layout_mode=data_layout_mode,
                     subgroup_columns=subgroup_columns, subgroup_var_name=subgroup_var_name,
                     ksq_toggles=ksq_toggles, chart_usage_mode=chart_usage_mode,
@@ -1410,6 +1539,7 @@ def run_full_analysis(
                     outlier_method=normalize_outlier_method(outlier_method))
     audit = dict(calculation_version=CALCULATION_VERSION,
                  calculation_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                 distribution_sha256=hashlib.sha256(Path(__file__).with_name('spc_nonnormal.py').read_bytes()).hexdigest(),
                  data_sha256=_input_digest(data_bytes), spec_sha256=_input_digest(spec_bytes),
                  settings=settings, numpy_version=np.__version__, pandas_version=pd.__version__)
     import scipy
@@ -1569,6 +1699,7 @@ def run_full_analysis(
                 sample_labels=t.get("sample_labels"),
                 outlier_method=outlier_method,
                 detail_level=detail_level,
+                distribution_config=distribution_settings.get(str(col)),
             )
             it['assessment'] = assess_process(it)
             results.append(it)
@@ -1582,6 +1713,13 @@ def run_full_analysis(
                 '신뢰도 상태': it.get('reliability_status', ''),
                 '신뢰도 사유': it.get('reliability_reason_text', ''),
                 '관리도': it.get('chart_mode', ''),
+                '분포 모드': it.get('distribution_mode', 'normal'),
+                '적용 분포': (it.get('distribution_model') or it.get('chart_model') or {}).get('name', '정규' if it.get('distribution_mode') != 'nonnormal' else '미확인'),
+                '능력 계산법': it.get('capability_method', 'normal'),
+                '기준분포 상태': it.get('chart_fit_status', ''),
+                '성능분포 상태': it.get('performance_fit_status', ''),
+                **{f'{name}.{method}': fmt_value(it.get(f'{name.lower()}_{method.lower()}', np.nan))
+                   for name in ('Cp', 'Cpk', 'Pp', 'Ppk') for method in ('G', 'Z')},
                 '평균': fmt_value(it['mu']),
                 '원본평균': fmt_value(it.get('original_mu', np.nan)),
                 'σ(전체)': fmt_value(it['std_all']),
@@ -1589,14 +1727,19 @@ def run_full_analysis(
                 'σ(군내)': fmt_value(it['std_within']),
                 'Cp': fmt_value(it['cp']),
                 'Cpk': fmt_value(it['cpk']),
-                'PPM(Within)': fmt_value(it['ppm_cpk'], comma=True),
+                'PPM(Within)': fmt_value(it['ppm_within'], comma=True),
                 'Pp': fmt_value(it['pp']),
                 'Ppk': fmt_value(it['ppk']),
                 'PPM(Overall)': fmt_value(it['ppm_ppk'], comma=True),
                 'Cpm': fmt_value(it['cpm']),
                 'Cpmk': fmt_value(it['cpmk']),
+                'Cw': fmt_value(it['cw']),
+                'Cwk': fmt_value(it['cwk']),
                 '목표치(T)': fmt_value(it['target'], 3),
-                '안정성(Cpk/Ppk)': fmt_value(it['stab_ratio']),
+                '군내/전체 지수 비율(Cwk/Ppk)': fmt_value(it['within_overall_ratio']),
+                '능력 적용 상태': it['capability_status'],
+                '능력 적용 사유': "; ".join(it['capability_reasons']),
+                '성능 해석 안내': it['performance_note'],
                 'PPM(실측)': fmt_value(it['emp_ppm'], comma=True),
                 '규격이탈': it['spec_violation_count'],
                 '운영모드': it.get('control_phase_label', ''),
@@ -1625,5 +1768,11 @@ def run_full_analysis(
 
     summary_df = pd.DataFrame(summary_rows)
     summary_df.attrs['audit'] = audit
+    summary_df.attrs['numeric_results'] = {
+        str(it['column']): {**{name: it.get(name.lower(), np.nan) for name in ('Cp', 'Cpk', 'Pp', 'Ppk', 'Cw', 'Cwk')},
+                           **{f'{name}.{method}': it.get(f'{name.lower()}_{method.lower()}', np.nan)
+                              for name in ('Cp', 'Cpk', 'Pp', 'Ppk') for method in ('G', 'Z')},
+                           'PPM(Within)': it['ppm_within'], 'PPM(Overall)': it['ppm_ppk'], 'PPM(실측)': it['emp_ppm']}
+        for it in results}
     return results, summary_df
 

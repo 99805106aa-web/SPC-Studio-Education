@@ -159,6 +159,9 @@ def build_control_chart(
         ksq_toggles = {f'T{i}': True for i in range(1, 9)}
     if show_zones is None:
         show_zones = {'C': True, 'B': True, 'A': True, 'Z3': True}
+    if it.get('distribution_mode') == 'nonnormal':
+        show_zones = {key: False for key in ('C', 'B', 'A', 'Z3')}
+        ksq_toggles = it.get('effective_rules', {'T1': True})
 
     means = it['means']
     ranges = it['ranges']
@@ -190,7 +193,7 @@ def build_control_chart(
 
     spread = abs(ucl - lcl) if np.isfinite(ucl) and np.isfinite(lcl) else 1.0
     decimals = min(8, max(3, int(-math.floor(math.log10(spread))) + 2)) if spread > 0 else 3
-    fig.text(0.075, 0.97, f"{col} · 관리도", fontsize=14, weight='bold',
+    fig.text(0.075, 0.97, f"{col} · {it.get('chart_mode', '관리도')}", fontsize=14, weight='bold',
              color=C['primary'], va='top')
     fig.text(0.075, 0.925,
              f"{phase_label}  ·  {limit_reference_label} 기준  ·  표시 {len(means):,} / 전체 {it.get('total_points', len(means)):,}점  ·  전체 집계: "
@@ -440,7 +443,7 @@ def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=Non
     offset = int(it.get('window_offset', 0))
     positions = np.arange(1, len(means) + 1) + offset
     labels = _labels_or_fallback(it.get('x_labels'), len(means), it['n'], it['is_xmr'])
-    enabled = ksq_toggles if ksq_toggles is not None else {}
+    enabled = it.get('effective_rules', {}) if it.get('distribution_mode') == 'nonnormal' else (ksq_toggles if ksq_toggles is not None else {})
     rules = [', '.join(k for k, indices in it.get('ksq_idx', {}).items()
                        if enabled.get(k, True) and i in indices) or '없음'
              for i in range(len(means))]
@@ -548,7 +551,12 @@ def build_histogram(
     lo, hi = lo-pad, hi+pad
     ax.hist(a, bins=max(5, bins), density=True, color=C['primary'], alpha=.65,
             edgecolor=C['ax_bg'], linewidth=.7, label='관측 분포')
-    if sd > 0:
+    if it.get('distribution_mode') == 'nonnormal' and (it.get('distribution_model') or {}).get('eligible'):
+        from spc_nonnormal import frozen_model
+        model = it['distribution_model']
+        xs = np.linspace(lo, hi, 600)
+        ax.plot(xs, frozen_model(model).pdf(xs), color=C['accent'], lw=2, label='적합 ' + model['name'] + ' 분포')
+    elif sd > 0 and it.get('distribution_mode') != 'nonnormal':
         xs = np.linspace(lo, hi, 600)
         ax.plot(xs, stats.norm.pdf(xs, mu, sd), color=C['accent'], lw=2, label='적합 정규분포')
     for name, value, color, style in refs:
@@ -572,6 +580,25 @@ def build_qq_plot(
     figsize: Tuple[float, float] = (9, 5.6),
 ) -> Figure:
     """Normal Q-Q diagnostic; no misleading observation-centred confidence band."""
+    if it.get('distribution_mode') == 'nonnormal':
+        from spc_nonnormal import frozen_model
+        fig, ax, C, ink = _distribution_canvas(it, palette, figsize, '적합분포 진단 / Q-Q Plot')
+        model = it.get('distribution_model') or {}
+        if model.get('eligible'):
+            a = np.sort(np.asarray(it['series'], dtype=float))
+            a = a[np.linspace(0, len(a)-1, min(len(a), 10000)).astype(int)]
+            theory = frozen_model(model).ppf((np.arange(len(a))+.5)/len(a))
+            ax.scatter(theory, a, s=12, color=C['primary'], alpha=.75)
+            lo, hi = min(theory.min(), a.min()), max(theory.max(), a.max())
+            ax.plot([lo, hi], [lo, hi], color=C['muted'])
+            _distribution_metrics(fig, [('적용 분포', model['name']), ('AD', _fmt(model['ad'])),
+                                       ('bootstrap p', _fmt(model['pvalue'])), ('검정 N', str(model['test_n']))], C, ink)
+            fig.text(.07, .055, '모수 재추정 bootstrap AD · 적합도 통과는 공정 안정성의 증거가 아닙니다.', fontsize=9, color=C['muted'])
+        else:
+            ax.text(.5, .5, '검증된 분포 없음 · 분포 진단과 선택을 확인하세요.', ha='center', transform=ax.transAxes)
+        ax.set_xlabel('선택 분포 이론 분위수')
+        ax.set_ylabel('관측값 분위수')
+        return fig
     fig, ax, C, ink = _distribution_canvas(it, palette, figsize, '정규성 진단  /  Q-Q Plot')
     a = np.asarray(it['series'], dtype=float)
     a = a[np.isfinite(a)]
@@ -581,21 +608,16 @@ def build_qq_plot(
     _distribution_metrics(fig, [('표본 수', f'{a.size:,}'), ('왜도', _fmt(skew)),
                                ('초과첨도', _fmt(kurt)), ('기준 분포', '정규분포')], C, ink)
     if valid:
-        (osm, osr), (slope, intercept, _) = stats.probplot(a, dist='norm')
+        from spc_core import _normality_sample, normality_message
+        (osm, osr), (slope, intercept, _) = stats.probplot(_normality_sample(a), dist='norm')
         ax.plot(osm, slope*osm+intercept, color=C['muted'], lw=1.4,
                 label='최소제곱 기준선', zorder=2)
         ax.scatter(osm, osr, s=20, color=C['primary'], alpha=.75,
                    edgecolors=C['ax_bg'], linewidths=.4, label='관측값', zorder=3)
-        if a.size <= 5000:
-            test = stats.shapiro(a)
-            ptext = 'p < 0.001' if test.pvalue < .001 else f'p = {test.pvalue:.3f}'
-            summary = f'Shapiro-Wilk   W = {test.statistic:.4f}   ·   {ptext}'
-            verdict = '정규성 이탈 신호 · 꼬리와 집단 혼합 여부를 확인하세요.' if test.pvalue < .05 else '유의수준 5%에서 정규성을 기각할 근거가 부족합니다.'
-        else:
-            test = stats.anderson(a, dist='norm')
-            crit = test.critical_values[np.argmin(abs(test.significance_level-5))]
-            summary = f'Anderson-Darling   A² = {test.statistic:.4f}   ·   5% 임계값 = {crit:.4f}'
-            verdict = '정규성 이탈 신호 · 꼬리와 집단 혼합 여부를 확인하세요.' if test.statistic > crit else '유의수준 5%에서 정규성을 기각할 근거가 부족합니다.'
+        summary = normality_message(a)
+        verdict = ('정규성 이탈 신호 · 꼬리와 집단 혼합 여부를 확인하세요.' if '의심' in summary
+                   else '유의수준 5%에서 정규성을 기각할 근거가 부족합니다.' if '만족' in summary
+                   else '정규성 검정 불가 · 측정값과 검정 조건을 확인하세요.')
         fig.text(.07, .105, summary, fontsize=10, color=ink, weight='bold')
         fig.text(.07, .055, verdict, fontsize=9, color=C['muted'])
         fig.text(.07, .015, '점이 기준선에서 벗어나는 위치와 크기를 함께 확인하세요.', fontsize=8, color=C['muted'])
@@ -615,12 +637,12 @@ def stability_assessment(results, ppk_limit=1.33, ratio_limit=1.25):
         raise ValueError('Ppk 기준은 0보다 크고 비율 기준은 1보다 커야 합니다.')
     rows = []
     for it in results:
-        ratio, ppk = it.get('stab_ratio'), it.get('ppk')
+        ratio, ppk = it.get('within_overall_ratio'), it.get('ppk')
         if ratio is None or ppk is None or not np.isfinite(ratio) or not np.isfinite(ppk) or ratio < 0:
             continue
         group = (0 if ppk >= ppk_limit else 2) + (1 if ratio > ratio_limit else 0)
         rows.append(dict(column=str(it['column']), ratio=float(ratio), ppk=float(ppk),
-                         cpk=it.get('cpk', np.nan), group=group))
+                         cwk=it.get('cwk', np.nan), group=group))
     return rows
 
 
@@ -640,10 +662,10 @@ def build_interactive_stability_scatter(results, palette=DEFAULT_PALETTE,
         ymin = min(ymin, min(r['ppk'] for r in rows) - .2)
         ymax = max(ymax, max(r['ppk'] for r in rows) * 1.12)
     regions = [
-        ('능력 충족 · 변동 차이 작음', '#16A085', (0, ratio_limit, ppk_limit, ymax)),
-        ('능력 충족 · 변동 차이 큼', '#C49A17', (ratio_limit, xmax, ppk_limit, ymax)),
-        ('능력 개선 · 변동 차이 작음', '#D98236', (0, ratio_limit, ymin, ppk_limit)),
-        ('능력 개선 · 변동 차이 큼', '#D84F65', (ratio_limit, xmax, ymin, ppk_limit)),
+        ('Ppk 기준 이상 · 변동 차이 작음', '#16A085', (0, ratio_limit, ppk_limit, ymax)),
+        ('Ppk 기준 이상 · 변동 차이 큼', '#C49A17', (ratio_limit, xmax, ppk_limit, ymax)),
+        ('Ppk 기준 미만 · 변동 차이 작음', '#D98236', (0, ratio_limit, ymin, ppk_limit)),
+        ('Ppk 기준 미만 · 변동 차이 큼', '#D84F65', (ratio_limit, xmax, ymin, ppk_limit)),
     ]
     fig = go.Figure()
     for group, (label, color, (x0, x1, y0, y1)) in enumerate(regions):
@@ -658,16 +680,16 @@ def build_interactive_stability_scatter(results, palette=DEFAULT_PALETTE,
             text=[html.escape(r['column']) for r in members], textposition='top right',
             textfont=dict(size=11, color=ink), name=label,
             marker=dict(size=11, color=color, line=dict(color=C['ax_bg'], width=1.5)),
-            customdata=[[html.escape(r['column']), r['cpk']] for r in members],
-            hovertemplate='<b>%{customdata[0]}</b><br>Ppk %{y:.4f}<br>Cpk %{customdata[1]:.4f}'
-                          '<br>|Cpk/Ppk| %{x:.4f}<extra>%{fullData.name}</extra>'))
+            customdata=[[html.escape(r['column']), r['cwk']] for r in members],
+            hovertemplate='<b>%{customdata[0]}</b><br>Ppk %{y:.4f}<br>Cwk %{customdata[1]:.4f}'
+                          '<br>|Cwk/Ppk| %{x:.4f}<extra>%{fullData.name}</extra>'))
     fig.add_vline(x=ratio_limit, line_color=C['muted'], line_dash='dash', line_width=1)
     fig.add_hline(y=ppk_limit, line_color=C['muted'], line_dash='dash', line_width=1)
     if show_contour:
         xs = np.linspace(max(.02, 1/ymax), xmax, 300)
-        fig.add_trace(go.Scatter(x=xs, y=1/xs, mode='lines', name='Cpk = 1 (Ppk > 0)',
+        fig.add_trace(go.Scatter(x=xs, y=1/xs, mode='lines', name='Cwk = 1 (Ppk > 0)',
                                 line=dict(color=C['danger'], width=1.8),
-                                hovertemplate='Cpk = 1<br>비율 %{x:.3f}<br>Ppk %{y:.3f}<extra></extra>'))
+                                hovertemplate='Cwk = 1<br>비율 %{x:.3f}<br>Ppk %{y:.3f}<extra></extra>'))
     outside = sum(not (0 <= r['ratio'] <= xmax and ymin <= r['ppk'] <= ymax) for r in rows)
     fig.update_layout(height=600, paper_bgcolor=C['ax_bg'], plot_bgcolor=C['ax_bg'],
                       font=dict(family=_chosen_font, color=ink), margin=dict(l=65, r=30, t=25, b=75),
@@ -676,9 +698,9 @@ def build_interactive_stability_scatter(results, palette=DEFAULT_PALETTE,
                           text=f'화면 밖 {outside}개 · 평가 제외 {len(results)-len(rows)}개',
                           x=1, y=1.06, xref='paper', yref='paper', xanchor='right',
                           showarrow=False, font=dict(size=11, color=C['muted']))])
-    fig.update_xaxes(title=f'장·단기 변동 비율 |Cpk/Ppk| · 구분 기준 {ratio_limit:g}',
+    fig.update_xaxes(title=f'군내/전체 지수 비율 |Cwk/Ppk| · 구분 기준 {ratio_limit:g}',
                      range=[0, xmax], gridcolor=C['grid'], zeroline=False)
-    fig.update_yaxes(title=f'전체 공정능력 Ppk · 충족 기준 {ppk_limit:g}',
+    fig.update_yaxes(title=f'전체 성능 Ppk (참고) · 충족 기준 {ppk_limit:g}',
                      range=[ymin, ymax], gridcolor=C['grid'], zeroline=False)
     return fig
 
@@ -689,15 +711,15 @@ def build_stability_scatter(
     figsize: Tuple[float, float] = (9, 6),
 ) -> Figure:
     """
-    ?덉젙???곗젏?? X異?Cpk/Ppk 鍮꾩쑉(?덉젙??, Y異?Ppk.
-    湲곗??? Cpk/Ppk=1 (?섏쭅), Ppk=1.33 / 1.0 (?섑룊).
+    ?덉젙???곗젏?? X異?Cwk/Ppk 鍮꾩쑉(?덉젙??, Y異?Ppk.
+    湲곗??? Cwk/Ppk=1 (?섏쭅), Ppk=1.33 / 1.0 (?섑룊).
     """
     C = _apply_palette(palette)
     fig, ax = plt.subplots(figsize=figsize, facecolor=C['bg'])
     ax.set_facecolor(C['ax_bg'])
 
     for it in results:
-        ratio = it.get('stab_ratio', np.nan)
+        ratio = it.get('within_overall_ratio', np.nan)
         ppk = it.get('ppk', np.nan)
         col = it['column']
         cpk = it.get('cpk', np.nan)
@@ -717,20 +739,20 @@ def build_stability_scatter(
         ax.annotate(str(col), (ratio, ppk), textcoords='offset points', xytext=(5, 3),
                     fontsize=7.5, color=C['muted'])
 
-    ax.axvline(1.0, linestyle='--', color=C['muted'], linewidth=1.1, alpha=0.7, label='안정도=1')
+    ax.axvline(1.0, linestyle='--', color=C['muted'], linewidth=1.1, alpha=0.7, label='군내/전체 비율=1')
     ax.axhline(1.33, linestyle='--', color=C['success'], linewidth=1.1, alpha=0.7, label='Ppk=1.33')
     ax.axhline(1.00, linestyle='--', color=C['warning'], linewidth=1.1, alpha=0.7, label='Ppk=1.00')
 
-    ax.set_xlabel('안정도 (|Cpk/Ppk|)', fontsize=10)
+    ax.set_xlabel('군내/전체 지수 비율 (|Cwk/Ppk|)', fontsize=10)
     ax.set_ylabel('Ppk', fontsize=10)
-    ax.set_title('공정 안정도 산점도 (Ppk vs Cpk/Ppk 비율)', fontweight='bold')
+    ax.set_title('군내·전체 변동 진단 산점도 (Ppk vs Cwk/Ppk 비율)', fontweight='bold')
     ax.legend(frameon=True, framealpha=0.88, fontsize=8.5)
 
     from matplotlib.patches import Patch
     legend_els = [
-        Patch(facecolor=C['success'], label='Ppk >= 1.33 (우수)'),
-        Patch(facecolor=C['warning'], label='1.00 <= Ppk < 1.33 (주의)'),
-        Patch(facecolor=C['danger'], label='Ppk < 1.00 (불량)'),
+        Patch(facecolor=C['success'], label='Ppk >= 1.33 (참고 기준 이상)'),
+        Patch(facecolor=C['warning'], label='1.00 <= Ppk < 1.33 (참고 구간)'),
+        Patch(facecolor=C['danger'], label='Ppk < 1.00 (참고 기준 미만)'),
     ]
     ax.legend(handles=legend_els, loc='upper left', fontsize=8, framealpha=0.88)
 
@@ -773,7 +795,7 @@ def build_overview_2x2(
     ppk = it['ppk']
     cpm = it.get('cpm', np.nan)
     cpmk = it.get('cpmk', np.nan)
-    ppm_cpk = it['ppm_cpk']
+    ppm_cpk = it.get('ppm_within', np.nan)
     ppm_ppk = it['ppm_ppk']
     emp_ppm = it['emp_ppm']
     xbarbar = it['xbarbar']
@@ -818,9 +840,11 @@ def build_overview_2x2(
         ("평균", _fmt(mu)),
         ("표준편차 (군내 / 전체)", f"{_fmt(std_within)} / {_fmt(std_all)}"),
         ("Cp / Cpk", f"{_fmt(cp)} / {_fmt(cpk)}"),
+        ("Cp/Cpk 적용 상태", it.get('capability_status', '재분석 필요')),
+        ("Cw / Cwk (진단용)", f"{_fmt(it.get('cw', np.nan))} / {_fmt(it.get('cwk', np.nan))}"),
         ("Pp / Ppk", f"{_fmt(pp)} / {_fmt(ppk)}"),
         ("Cpm / Cpmk", f"{_fmt(cpm)} / {_fmt(cpmk)}"),
-        ("안정도 (Cpk/Ppk)", _fmt(stab_ratio)),
+        ("진단 비율 (Cwk/Ppk)", _fmt(stab_ratio)),
         ("PPM (Within)", f"{ppm_cpk:,.0f}" if np.isfinite(ppm_cpk) else "N/A"),
         ("PPM (Overall)", f"{ppm_ppk:,.0f}" if np.isfinite(ppm_ppk) else "N/A"),
         ("PPM (Observed)", f"{emp_ppm:,.0f}" if np.isfinite(emp_ppm) else "N/A"),
@@ -830,6 +854,8 @@ def build_overview_2x2(
          f"UCL {it['xbar_ucl_cnt']}/{it['r_ucl_cnt']}  LCL {it['xbar_lcl_cnt']}/{it['r_lcl_cnt']}"),
         ("Normality", norm_msg),
     ]
+    if it.get('distribution_mode') == 'nonnormal':
+        lines.append(('분포 / 계산법', (it.get('distribution_model') or {}).get('name', '미확인') + ' / ' + it.get('capability_method', 'G')))
 
     # 諛곌꼍 諛뺤뒪
     ax1.add_patch(Rectangle((0.01, 0.01), 0.98, 0.98, linewidth=1,
@@ -867,7 +893,11 @@ def build_overview_2x2(
     ax2.hist(series, bins=max(5, hist_bins), density=True, alpha=0.85, color=C['primary'],
              edgecolor='white', linewidth=0.4)
     xs_h = np.linspace(xmin_h, xmax_h, 300)
-    if np.isfinite(std_all) and std_all > 0:
+    if it.get('distribution_mode') == 'nonnormal' and (it.get('distribution_model') or {}).get('eligible'):
+        from spc_nonnormal import frozen_model
+        model = it['distribution_model']
+        ax2.plot(xs_h, frozen_model(model).pdf(xs_h), linewidth=2., color=C['accent'], label=model['name']+' PDF')
+    elif np.isfinite(std_all) and std_all > 0 and it.get('distribution_mode') != 'nonnormal':
         ax2.plot(xs_h, stats.norm.pdf(xs_h, mu, std_all), linewidth=2.0, color=C['accent'], label='정규PDF')
     ax2.axvline(mu, linestyle='--', color=C['mean'], linewidth=1.2, label='평균')
     if np.isfinite(target):
@@ -892,7 +922,7 @@ def build_overview_2x2(
             (A2_plot * r_bar) / 3.0 if (np.isfinite(r_bar) and np.isfinite(A2_plot)) else np.nan
         )
 
-    if np.isfinite(sigma_x) and sigma_x > 0 and np.isfinite(xbarbar):
+    if np.isfinite(sigma_x) and sigma_x > 0 and np.isfinite(xbarbar) and it.get('distribution_mode') != 'nonnormal':
         z1u = xbarbar + sigma_x
         z2u = xbarbar + 2 * sigma_x
         z1l = xbarbar - sigma_x

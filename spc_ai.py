@@ -91,6 +91,18 @@ def build_var_context(it: Dict[str, Any], beginner_mode: bool) -> Dict[str, Any]
         "std_overall": _to_float(it.get("std_all")),
         "cp": _to_float(it.get("cp")),
         "cpk": _to_float(it.get("cpk")),
+        "cw": _to_float(it.get("cw")),
+        "cwk": _to_float(it.get("cwk")),
+        "within_overall_ratio": _to_float(it.get("within_overall_ratio")),
+        "capability_status": str(it.get("capability_status", "재분석 필요")),
+        "capability_reasons": list(it.get("capability_reasons", [])),
+        "performance_note": str(it.get("performance_note", "")),
+        "distribution_mode": it.get('distribution_mode', 'normal'),
+        "distribution_model": it.get('distribution_model'),
+        "chart_model": it.get('chart_model'),
+        "capability_method": it.get('capability_method', 'normal'),
+        "capability_methods": it.get('capability_methods', {}),
+        "pearson_rules_note": it.get('pearson_rules_note', ''),
         "pp": _to_float(it.get("pp")),
         "ppk": _to_float(it.get("ppk")),
         "cpm": _to_float(it.get("cpm")),
@@ -134,8 +146,9 @@ def _fallback_interpretation(context: Dict[str, Any], admin_mode: bool, reason: 
         summary = f"{col}: 현재는 안정 상태로 보입니다."
 
     evidence = [
-        {"metric": "Cpk", "value": _fmt(cpk), "reason": "공정능력 기준(1.00/1.33) 비교"},
-        {"metric": "Ppk", "value": _fmt(ppk), "reason": "장기 공정능력 확인"},
+        {"metric": "Cpk", "value": _fmt(cpk), "reason": str(context.get("capability_status", "재분석 필요")) + ": " + "; ".join(context.get("capability_reasons", []))},
+        {"metric": "Ppk", "value": _fmt(ppk), "reason": context.get('performance_note', '선택 분포 모형의 참고값')},
+        {"metric": "Cwk", "value": _fmt(context.get("cwk")), "reason": "군내 변동에 기반한 공정 진단 지수; 이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않음"},
         {"metric": "Cpm/Cpmk", "value": f"{_fmt(cpm)} / {_fmt(cpmk)}", "reason": "목표치 반영 능력 확인"},
         {"metric": "관리한계 이탈", "value": str(ctrl), "reason": "X/산포 관리도 UCL/LCL 이탈 건수"},
         {"metric": "규격 이탈", "value": str(spec), "reason": "USL/LSL 벗어난 건수"},
@@ -324,6 +337,9 @@ def _build_interpretation_prompt(context: Dict[str, Any], admin_mode: bool) -> s
 
 [요청 사항]
 - assessment의 계산 판정을 우선하고, 안정성 검토가 필요한 공정을 Cpk만으로 정상이라고 설명하지 마세요.
+- Cp/Cpk는 전체 산포 기준이며 capability_status가 적용 가능일 때만 해석합니다. 적용 조건을 충족하지 못한 값을 추정하거나 Cwk로 대체하지 마세요.
+- Cw/Cwk는 군내 산포 진단용이고 Pp/Ppk와 예상 PPM은 정규모델 가정 참고값입니다. 비정규 의심 시 공식 능력 판정을 하지 마세요.
+- distribution_mode가 nonnormal이면 검증된 선택 분포와 capability_method(G/Z)를 설명하고 원자료 정규성 기각만으로 비정규 지수를 부정하지 마세요. Pearson은 T1만 적용하며 Cw/Cwk/Cpm/Cpmk는 미적용입니다.
 - 예상 능력 부족과 원본 규격이탈을 구분하고, 원인은 확인이 필요한 가설로만 제시하세요.
 - {'초보자도 이해하기 쉽게 설명하세요.' if not admin_mode else '전문적인 통계 용어와 분석을 제공하세요.'}
 
@@ -542,7 +558,7 @@ def _compact_summary_for_prompt(full_summary: str, max_rows: int = 80) -> str:
         return str(full_summary)[:12000]
 
     keep_cols = [
-        "변수", "N", "원본N", "분석N", "신뢰도 상태", "신뢰도 사유", "관리도", "Cpk", "Ppk", "Cpm", "Cpmk",
+        "변수", "N", "원본N", "분석N", "신뢰도 상태", "신뢰도 사유", "능력 적용 상태", "능력 적용 사유", "성능 해석 안내", "관리도", "적용 분포", "능력 계산법", "기준분포 상태", "성능분포 상태", "Cpk", "Ppk", "Cw", "Cwk", "군내/전체 지수 비율(Cwk/Ppk)", "Cpm", "Cpmk",
         "규격이탈", "X관리이탈", "R관리이탈", "최근규격이탈", "최근관리이탈",
         "운영모드", "한계기준", "기준구간상태", "기준구간사유", "능력기준", "비고",
     ]
@@ -588,6 +604,8 @@ def _fallback_chat_response(query: str, full_summary: str, reason: str = "") -> 
             "ctrl": x_ctrl + r_ctrl,
             "reliability": str(row.get("신뢰도 상태", "") or ""),
             "reliability_reason": str(row.get("신뢰도 사유", "") or ""),
+            "capability_status": str(row.get("능력 적용 상태", "") or ""),
+            "capability_reason": str(row.get("능력 적용 사유", "") or ""),
             "note": str(row.get("비고", "") or "").strip(),
         })
 
@@ -616,6 +634,13 @@ def _fallback_chat_response(query: str, full_summary: str, reason: str = "") -> 
             ppk_txt = _fmt(x["ppk"])
             rel = f", 신뢰도 {x['reliability']}" if x.get("reliability") else ""
             lines.append(f"- {x['name']}: Cpk {cpk_txt}, Ppk {ppk_txt}, 규격이탈 {x['spec']}건, 관리이탈 {x['ctrl']}건{rel}")
+
+    held = [x for x in enriched if x['capability_status'] and x['capability_status'] != '적용 가능']
+    if held:
+        lines.append("Cp·Cpk 검토 대상 (기준 충족/미달 집계에서 제외):")
+        for x in held[:10]:
+            lines.append(f"- {x['name']}: {x['capability_status']} · {x['capability_reason']}")
+    lines.append("Pp·Ppk와 예상 PPM은 선택 분포 모형의 참고값입니다. 비정규 결과는 적용 분포와 G/Z 방법을 확인하세요. 정규식 Cw·Cwk는 군내 산포 진단용입니다.")
 
     if spec_bad or ctrl_bad:
         lines.append("")
@@ -790,7 +815,8 @@ def chat_with_spc_data(
 
 [답변 가이드]
 1. 사용자가 특정 변수에 대해 물어보면 위 요약 데이터를 근거로 답변하세요.
-2. Cpk가 1.0 미만인 항목은 '불량', 1.33 미만은 '주의'로 취급합니다.
+2. Cp/Cpk는 전체 산포 기준이며 능력 적용 상태가 '적용 가능'일 때만 기준과 비교합니다. '관리상태 확인', '분포 검토 필요', '정규성 확인 필요'인 값을 추정하거나 Cwk로 대체하지 마세요. Pp/Ppk와 예상 PPM은 정규모델 가정 참고값이며 비정규 의심 시 능력을 확정하지 마세요. Cw/Cwk는 군내 산포 진단용입니다.
+비정규 모드의 검증된 분포에는 선택한 G/Z 계산법을 적용하며 원자료의 정규성 기각만으로 지수를 부정하지 않습니다. Pearson은 T1만 적용하고 정규식 군내·목표치 지수는 미적용입니다.
 3. 통계적 전문 지식을 바탕으로 원인 추정이나 조치 방안을 제안하세요.
 4. 요약 데이터에 없는 내용은 추측하지 말고 모른다고 답변하거나 추가 데이터를 요청하세요.
 5. 답변은 가급적 불필요한 서론 없이 핵심 위주로, 마크다운 형식을 사용하여 읽기 좋게 작성하세요.

@@ -1,74 +1,80 @@
-# SPC Studio 교육용 공유
+﻿# SPC Studio 교육용 공유 · MSA와 동일한 사용일 방식
 
-수강생은 공개 URL을 Chrome 또는 Edge로 엽니다. Python 설치와 앱 로그인이 필요 없습니다.
-한국시간 기준 지정일의 00:00부터 다음 날 00:00 전까지만 사용합니다.
+교육생은 공개 URL을 Chrome 또는 Edge로 엽니다. 지정된 교육일에는 회원가입·로그인·사용자 비밀번호 입력 없이 예제·분석·보고서를 사용할 수 있습니다.
 
-## 배포
+## 강사의 사용일 설정
+
+1. 왼쪽 사이드바 **사용일 설정**을 펼칩니다.
+2. 관리자 비밀번호를 입력하고 **입장**을 누릅니다.
+3. **사용 가능일**을 선택하고 **사용일 저장**을 누릅니다.
+4. 교육생에게 접속 URL과 교육일을 안내합니다.
+
+사용 가능일은 한국시간 00:00부터 다음 날 00:00 전까지입니다. 날짜 전·후와 미설정 상태에서는 분석이 잠기며, 관리자는 잠긴 상태에서도 다음 교육일을 지정할 수 있습니다. **관리자 잠금**은 설정·관리 기능을 잠그며 당일 교육생의 분석 화면은 계속 열려 있습니다.
+
+관리자 비밀번호의 우선순위는 `SPC_ADMIN_PASSWORD` 환경변수 → Streamlit Secrets → 기존 SPC에 등록한 관리자 비밀번호 → MSA와 같은 기본 비밀번호 `0017080`입니다. 새 사용자 비밀번호와 최초 등록 절차는 없습니다. 관리자 인증은 브라우저 세션별이며, 비밀번호 변경·서버 재시작 후에는 다시 인증합니다. 세션 내 5회 실패 시 1분 대기합니다.
+
+기존 SPC의 관리자 비밀번호 해시는 유지합니다. 예전 시작일·종료일이 같은 날이면 그 날짜를 사용합니다. 여러 날로 설정했다면 관리자가 사용 가능일 하루를 다시 저장해야 합니다. 저장 시 사용하지 않는 사용자 비밀번호 해시는 제거합니다.
+
+## Streamlit Community Cloud 배포
 
 1. `python tools/build_education_bundle.py`로 `dist/SPC_교육용_배포.zip`을 만듭니다.
-2. ZIP을 풀어 **내용물만** 교육 전용 GitHub 저장소에 업로드합니다. 업무 폴더 전체를 올리지 마세요.
-3. [Streamlit Community Cloud](https://share.streamlit.io)에서 새 앱을 만들고 저장소와 브랜치를 선택합니다.
-4. Main file path는 **`education_app.py`**, Python은 **3.12**를 선택합니다.
-5. Advanced settings의 Secrets에 아래 값을 입력하고 배포합니다.
+2. ZIP을 풀고 내용물만 교육 전용 GitHub 저장소에 업로드합니다.
+3. Streamlit Community Cloud에서 저장소·브랜치를 선택합니다.
+4. Main file path는 **education_app.py**, Python은 **3.12**를 선택합니다.
+5. 배포된 앱에서 위 절차로 사용일을 지정합니다.
+6. 교육생에게 실제 앱 URL을 공유합니다.
+
+현재 교육용 저장소: `99805106aa-web/SPC-Studio-Education`, 브랜치: `main`, 실행 파일: `education_app.py`.
+
+배포된 앱에서는 **교육 접속 주소 · QR**에 실제 `*.streamlit.app` 접속 주소와 QR이 표시됩니다. **접속 QR PNG 내려받기**, **접속 주소 TXT 내려받기**로 강의자료에 사용할 수 있습니다. 사용일 전·후에도 접속 안내는 볼 수 있습니다. `localhost` 주소를 공개 URL처럼 표시하지 않습니다. 관리자 인증 후 공개 주소를 직접 저장하거나 Secrets의 `SPC_PUBLIC_URL`로 지정할 수도 있습니다.
+
+교육 진입점은 교육용 화면을 활성화합니다. PC 경로·즐겨찾기·자동 감시·메일 발송과 사용자 API 키 입력은 교육생에게 제공하지 않습니다. AI는 관리자 인증 세션만 사용합니다. 일반 `app.py`도 같은 사용일 제한을 적용하지만 기존 PC 기능은 유지합니다.
+
+[공식 배포 안내](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy)
+
+### 선택적인 서버 설정
+
+관리자 비밀번호를 서버에서 지정하거나 날짜를 고정하려는 경우에만 Secrets를 설정합니다.
 
 ```toml
-SPC_ADMIN_PASSWORD = "강사가-정한-긴-비밀번호"
-# 고정 교육일이 필요할 때만 추가합니다. 생략하면 앱에서 날짜를 지정합니다.
+SPC_ADMIN_PASSWORD = "강사가-정한-관리자-비밀번호"
+# 날짜를 앱에서 바꾸려면 아래 항목을 생략하세요.
 # SPC_ALLOWED_DATE = "2026-11-20"
+# SPC_PUBLIC_URL = "https://실제로-배포한-앱.streamlit.app"
+# GROQ_API_KEY = "..."
+# GEMINI_API_KEY = "..."
+# OPENROUTER_API_KEY = "..."
 ```
 
-교육 진입점은 공유 모드를 항상 활성화합니다. 일반 `app.py`는 기존 PC 모드입니다.
-일반 진입점에서 공유 모드를 켜려면 환경변수 또는 Secrets에 `SPC_EDUCATION_MODE = true`를 지정합니다.
-Cloud 앱은 공개 접근으로 설정하고 생성된 실제 URL을 수강생에게 전달하세요.
+`SPC_ALLOWED_DATE`는 환경변수 → Cloud Secrets → 앱 저장 날짜 순서로 적용합니다. 서버에서 날짜를 고정하면 앱의 날짜 편집은 비활성화합니다. 이전 `SPC_ALLOWED_START_DATE`·`SPC_ALLOWED_END_DATE` 설정은 제거하고 `SPC_ALLOWED_DATE` 하루 지정으로 바꾸세요. 두 값이 같은 기존 단일 날짜만 호환합니다.
 
-ZIP에는 `.streamlit/config.toml`, 비밀값 없는 `.streamlit/secrets.example.toml`, `.gitignore`가 들어갑니다.
-프로젝트 루트의 `STREAMLIT_CONFIG_TEMPLATE.toml`, `SECRETS_TEMPLATE.toml`, `GITIGNORE_TEMPLATE.txt`로 생성합니다.
-Linux용 `packages.txt`는 한글 폰트와 Chromium을 설치합니다. PDF 워커는 교육 모드의 Linux에서
-시스템 Chromium을 사용하고 PC에서는 기존 Playwright 브라우저를 사용합니다.
-[공식 배포 안내](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy)와
-[의존성 설정](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/app-dependencies)을 참고하세요.
+사용일은 `education_runtime/access_day.json`에 저장합니다. 서버 재생성으로 파일이 사라지면 다시 잠기므로 관리자가 날짜를 재지정해야 합니다. 고정 날짜를 유지하려면 Secrets를 사용할 수 있습니다. 배포 ZIP에는 실제 사용일 파일, 관리자 비밀번호 해시, API 키, 업무 데이터와 개인 설정을 넣지 않습니다.
 
-## 강사 설정
+## 교육생 실습
 
-- 사이드바 `사용일 설정 / 관리자`에서 인증한 뒤 사용할 날짜를 저장합니다.
-- 날짜 미설정·잘못된 설정·기간 외에는 분석 화면이 잠깁니다. 관리자 설정은 계속 접근할 수 있습니다.
-- `SPC_ADMIN_PASSWORD` 미설정 시 관리자 기능을 잠급니다. 소스에 기본 비밀번호를 넣지 않습니다.
-- 사용일은 환경변수 `SPC_ALLOWED_DATE` → Cloud Secrets → 앱 저장값 순서로 적용합니다.
-  환경변수나 Secrets에 날짜가 있으면 화면에서 변경할 수 없습니다.
-- 앱 저장값은 `education_runtime/access_day.json`에 보관합니다. Cloud 재배포·서버 교체로 이 파일이
-  사라지면 다시 잠기므로 재지정하세요. 고정 날짜는 Secrets로 관리합니다.
-- 관리자 인증은 각 브라우저 세션에만 적용됩니다. 잠금 버튼, 비밀번호 변경, 서버 재시작 시 재인증합니다.
-  세션 내 비밀번호 5회 실패 시 1분 대기합니다.
-- AI는 관리자 인증 세션만 사용합니다. 키는 서버 Secrets의 `GEMINI_API_KEY`, `GROQ_API_KEY`,
-  `OPENROUTER_API_KEY`로 설정합니다. 수강생에게 키 입력창을 제공하지 않습니다.
+1. 교육일에 공유 URL로 접속합니다.
+2. **교육용 예제 → 예제 불러오기**를 선택합니다.
+3. 부분군 크기 5로 분석합니다.
+4. 자체 Excel은 **한 번만 업로드**하고 데이터 시트와 규격 시트를 각각 선택합니다. 규격 시트의 열은 `항목, USL, LSL, Target`을 사용합니다. 별도 규격 파일과 규격 없는 CSV도 지원합니다. 교육용 통합 예제 Excel에는 `DATA`·`SPEC` 시트가 들어 있습니다.
+5. 종료 전 보고서를 내려받습니다.
 
-## 수강생 실습
-
-1. 공유받은 URL을 열고 사용 가능일을 확인합니다.
-2. `교육용 예제 → 예제 불러오기`로 직경·두께 각 150개의 합성 데이터와 규격을 불러옵니다.
-3. 부분군 크기 5로 `분석 시작`을 누르고 관리도와 공정능력을 확인합니다.
-4. 자체 실습 파일은 Excel/CSV로 업로드합니다. 규격은 `항목, USL, LSL, Target` 열을 사용합니다.
-5. 종료 전 HTML·Excel·PDF 보고서를 다운로드합니다. 예제 CSV도 내려받을 수 있습니다.
-
-입력·결과·설정은 각 접속 세션에만 보관하며 새 세션에서 자동 복원되지 않습니다.
-기밀·개인정보는 업로드하지 마세요. PC 경로·즐겨찾기·자동 감시·메일 발송은 교육 모드에서 제공하지 않습니다.
-열린 화면은 1초마다 날짜를 확인하며 분석·AI·보고서 작업 전후에도 서버가 사용일을 확인합니다.
-이미 내려받거나 브라우저에 전달된 파일은 회수하지 않습니다.
+자료와 결과는 각 브라우저 세션에 보관됩니다. 열린 화면은 1초마다 사용 가능일을 확인하고, 분석·AI·보고서 작업 전후에도 사용일을 확인합니다. 만료 시 화면의 결과와 진행 중인 분포 진단을 정리합니다. 이미 내려받은 파일은 회수하지 않습니다.
 
 ## 교육 전 확인
 
-- 앱을 미리 열어 절전 상태에서 깨우고 시크릿 창에서 공개 접속을 확인합니다.
-- 지정일 전·당일·종료 후 잠금과 기간 외 관리자 설정을 확인합니다.
-- 독립 브라우저 2개에서 서로 다른 데이터로 분석해 결과가 섞이지 않는지 확인합니다.
-- 예제·Excel/CSV·한글 차트와 HTML·Excel·PDF 다운로드를 확인합니다.
-- 실제 예상 인원으로 동시 접속·분석·다운로드를 시험합니다. 특정 수용 인원을 보장하지 않습니다.
-- 실제 URL을 강의자료와 안내문에 넣고 교육 종료 전에 결과 저장을 안내합니다.
+- 관리자만 날짜를 변경할 수 있고 교육생에게 사용자 로그인 화면이 나타나지 않는지 확인합니다.
+- 교육일 전·당일·종료 후의 화면과 보고서 접근을 확인합니다.
+- 독립 브라우저에서 서로 다른 자료를 사용해 결과가 섞이지 않는지 확인합니다.
+- 실제 예상 교육 인원으로 동시 분석·분포 진단·다운로드를 시험합니다.
 
-## 로컬 확인
+## 로컬 실행
 
 ```powershell
-$env:SPC_ADMIN_PASSWORD = "강사용-비밀번호"
 python -m streamlit run education_app.py --server.port 8503
 ```
 
-PC 모드는 기존 `start.bat` 또는 `python -m streamlit run app.py --server.port 8502`로 실행합니다.
+PC 기능을 사용하는 일반 앱은 `start.bat` 또는 다음 명령으로 실행합니다.
+
+```powershell
+python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8502
+```
