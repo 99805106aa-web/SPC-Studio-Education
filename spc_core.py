@@ -48,7 +48,7 @@ _d2_mr = 1.128  # I-MR에서 MRbar→σ 변환
 NORMALITY_MAX = 10000
 NORMALITY_SW_CUTOFF = 50  # n<=50: Shapiro-Wilk, 초과: Anderson-Darling
 
-CALCULATION_VERSION = "2026.11.17.4"
+CALCULATION_VERSION = "2026.11.17.5"
 WITHIN_CAPABILITY_NOTICE = (
     "Cw·Cwk는 군내 변동에 기반한 공정 진단 지수입니다. "
     "이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않습니다. "
@@ -216,75 +216,15 @@ def _normality_sample(arr: np.ndarray, limit: int = NORMALITY_MAX) -> np.ndarray
 
 
 def normality_message(arr: np.ndarray, alpha: float = 0.05) -> str:
-    """
-    정규성 검정 결과 문자열 반환.
-    - n <= 50: Shapiro-Wilk
-    - n > 50: Anderson-Darling (p 근사)
-    """
-    arr = np.asarray(arr, dtype=float)
-    total_n = int(np.isfinite(arr).sum())
-    arr = _normality_sample(arr)
-    n = arr.size
-    sample_note = f" · 검정 표본 {n:,}/전체 {total_n:,}" if n < total_n else ""
-    if n < 3:
-        return f"정규성 검정 불가 (유효 표본수 {n} < 3)"
-    if np.nanstd(arr) == 0.0:
-        return "정규성 검정 불가 (모든 값이 동일: 표준편차=0)"
-
-    if n <= NORMALITY_SW_CUTOFF:
-        try:
-            _, p = stats.shapiro(arr)
-            return f"P-값 = {p:.3f} ({'만족' if p >= alpha else '의심'}) [Shapiro-Wilk]"
-        except Exception as e:
-            return f"정규성 검정 불가 (예외: {e.__class__.__name__})"
-
-    try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            ad = stats.anderson(arr, dist='norm')
-        p = _ad_pvalue_from_A2(float(ad.statistic), n)
-        return f"P-값 = {p:.3f} ({'만족' if p >= alpha else '의심'}) [Anderson-Darling]{sample_note}"
-    except Exception:
-        try:
-            sample = _normality_sample(arr, 5000)
-            _, p = stats.shapiro(sample)
-            return (f"P-값 = {p:.3f} ({'만족' if p >= alpha else '의심'}) [Shapiro-Wilk fallback]"
-                    + (f" · 검정 표본 {len(sample):,}/전체 {total_n:,}" if len(sample) < total_n else ""))
-        except Exception as e2:
-            return f"정규성 검정 불가 (예외: {e2.__class__.__name__})"
+    from spc_normality import normality_diagnostics
+    return normality_diagnostics(arr, alpha)['message']
 
 
 def qq_stats_text(arr: np.ndarray) -> str:
-    """QQ플롯 하단에 표시할 왜도/첨도/SW/AD p-값 문자열."""
-    a = np.asarray(arr, dtype=float)
-    a = a[np.isfinite(a)]
-    if a.size == 0:
-        return "데이터 없음"
-
-    skew = float(stats.skew(a, nan_policy='omit', bias=False))
-    kurt_ex = float(stats.kurtosis(a, nan_policy='omit', fisher=True, bias=False))
-
-    sw_txt = "—"
-    try:
-        if 3 <= a.size <= 5000:
-            _, p_sw = stats.shapiro(a)
-            sw_txt = f"{p_sw:.3f}"
-    except Exception:
-        pass
-
-    ad_txt = "—"
-    try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            ad = stats.anderson(a, dist='norm')
-        ad_txt = f"{_ad_pvalue_from_A2(float(ad.statistic), a.size):.3f}"
-    except Exception:
-        pass
-
-    return (f"왜도 {skew:.3f}   ·   첨도 {kurt_ex:.3f}\n"
-            f"Shapiro-Wilk p {sw_txt}   ·   Anderson-Darling p {ad_txt}")
+    from spc_normality import normality_diagnostics, pvalue_text
+    record = normality_diagnostics(arr)
+    shape = [str(record.get(key)) for key in ('skewness', 'excess_kurtosis')]
+    return f"왜도 {shape[0]} / 초과첨도 {shape[1]}\n{record['message']}"
 
 
 def detect_ksq_rules(
@@ -1348,6 +1288,8 @@ def analyze_column(
     if box_cox_applied and not capability_unavailable and detail_level == 'full':
         from spc_policy import boxcox_capability
         result = boxcox_capability(result)
+    from spc_normality import result_diagnostics
+    result['normality_diagnostics'] = result_diagnostics(result)
     return finalize_assessment(result, assessment_settings)
 
 
@@ -1551,6 +1493,7 @@ def run_full_analysis(
     반환: (results_list, summary_df)
     """
     from spc_nonnormal import MODEL_VERSION, normalize_settings_map
+    from spc_normality import STATUS_LABELS
     distribution_settings = normalize_settings_map(distribution_settings)
     assessment_settings = normalize_assessment(assessment_settings)
     settings = dict(assessment_settings=assessment_settings, distribution_settings=distribution_settings, distribution_model_version=MODEL_VERSION,
@@ -1566,6 +1509,7 @@ def run_full_analysis(
                  calculation_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                  distribution_sha256=hashlib.sha256(Path(__file__).with_name('spc_nonnormal.py').read_bytes()).hexdigest(),
                  policy_sha256=hashlib.sha256(Path(__file__).with_name('spc_policy.py').read_bytes()).hexdigest(),
+                 normality_sha256=hashlib.sha256(Path(__file__).with_name('spc_normality.py').read_bytes()).hexdigest(),
                  data_sha256=_input_digest(data_bytes), spec_sha256=_input_digest(spec_bytes),
                  settings=settings, numpy_version=np.__version__, pandas_version=pd.__version__)
     import scipy
@@ -1745,6 +1689,13 @@ def run_full_analysis(
                 '위치 관리도 분포': (it.get('chart_model') or {}).get('name', ''),
                 '위치 한계 계산': it.get('chart_limit_method', ''),
                 '능력 계산법': it.get('capability_method', 'normal'),
+                '정규성 검정법': it.get('normality_diagnostics',{}).get('individual',{}).get('test'),
+                '정규성 p값': it.get('normality_diagnostics',{}).get('individual',{}).get('pvalue'),
+                '정규성 판정': STATUS_LABELS[it.get('normality_diagnostics',{}).get('individual',{}).get('status', 'not_evaluated')],
+                '정규성 대상': '원단위 · 분석 포함 개별값',
+                '검정N': it.get('normality_diagnostics',{}).get('individual',{}).get('test_n'),
+                '왜도': it.get('normality_diagnostics',{}).get('individual',{}).get('skewness'),
+                '초과첨도': it.get('normality_diagnostics',{}).get('individual',{}).get('excess_kurtosis'),
                 '고객 요구값': assessment_settings['required_limit'],
                 '개선 경계': assessment_settings['warning_limit'],
                 '조사 결론': it.get('study_conclusion', ''),

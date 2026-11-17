@@ -13,6 +13,7 @@ import math
 import base64
 import numpy as np
 import pandas as pd
+from spc_normality import diagnostics_html
 from typing import Any, Dict, List, Optional, Tuple
 
 PROCESS_INFO_LABELS = ["공정명", "라인/호기", "설비명", "제품명", "품번", "Lot/Batch", "작업자/교대", "비고"]
@@ -159,6 +160,9 @@ def _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols, it=None) -> Tup
         return "—", "na"
     sval = str(val)
     cls = ""
+    if col == '정규성 p값':
+        from spc_normality import pvalue_text
+        return pvalue_text(float(val)), ''
     try:
         fv = float(str(val).replace(",", ""))
         if col in cap_cols:
@@ -462,7 +466,9 @@ def export_summary_excel(
             c.alignment = left if (var_col_idx and col_idx == var_col_idx) else center
 
             if isinstance(c.value, (int, float)):
-                if _is_int_like(col_name):
+                if col_name == '정규성 p값':
+                    c.number_format = '[<0.001]"<0.001";0.000000'
+                elif _is_int_like(col_name):
                     c.number_format = "#,##0"
                 else:
                     c.number_format = "0.000"
@@ -607,6 +613,16 @@ def export_summary_excel(
             value = it.get(key)
             ws_review.append([str(it['column']),key,json.dumps(value,ensure_ascii=False,default=str) if isinstance(value,(dict,list)) else value])
     _auto_width(ws_review, max_width=100)
+    from spc_normality import diagnostic_rows, STATUS_LABELS
+    ws_normality=wb.create_sheet('정규성·형태')
+    ws_normality.append(['변수','대상','범위','단위','검정법','통계량','보정 AD 통계량','p값','판정','유의수준','검정N','전체N','왜도','초과첨도','표본 방식','사유'])
+    for row in diagnostic_rows(results):
+        ws_normality.append([row['variable'],row['target'],row['scope'],row['scale'],row['test'],row['statistic'],
+            row['adjusted_statistic'],row['pvalue'],STATUS_LABELS[row['status']],row['alpha'],row['test_n'],row['total_n'],
+            row['skewness'],row['excess_kurtosis'],row['sampling'],row['reason']])
+        ws_normality.cell(ws_normality.max_row,8).number_format='[<0.001]"<0.001";0.000000'
+    ws_normality.freeze_panes='A2'
+    _auto_width(ws_normality,max_width=65)
     nonlinear = [it for it in results if it.get('distribution_mode') == 'nonnormal' or it.get('box_cox_applied')]
     if nonlinear:
         import json
@@ -746,7 +762,8 @@ def export_analysis_html(
         <div class="metrics">
           {''.join(metric_cards)}
         </div>
-        <div class="norm">정규성: {norm_msg}</div>
+        <div class="norm">정규성 (계산 단위): {norm_msg}</div>
+        {diagnostics_html(it)}
         {histogram_html}
         """
 

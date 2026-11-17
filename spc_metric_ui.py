@@ -137,6 +137,7 @@ def process_metric_cards_html(it):
     if (nonnormal and int(it.get('n', 0)) > 1) or (not nonnormal and not (kind == 'R' and int(it.get('n', 0)) <= 6)):
         stats.append(_card(f'{kind}-LCL', fmt_value(it.get('r_lcl')), '', '', f'{kind} 산포 관리하한입니다.'))
     groups = [_group('측정 통계 · 관리한계', '', stats, layout='stats')]
+    groups.append(normality_cards_html(it))
     primary = []
     for key, label in [('cp', 'Cp'), ('cpk', 'Cpk')]:
         value = it.get(key)
@@ -186,3 +187,31 @@ def _capability_badge(value, it=None):
     if float(value) < required:
         return f'주의 · < {required:.2f}', 'warn'
     return f'충족 · ≥ {required:.2f}', 'good'
+
+
+def normality_cards_html(it):
+    from spc_normality import STATUS_LABELS, pvalue_text, diagnostic_hint
+    record=it.get('normality_diagnostics',{}).get('individual')
+    if not record:
+        cards=[_card(label,'—','','상세 분석 필요','상세 분석 후 검정 대상과 함께 표시합니다.')
+               for label in ('정규성 p값','왜도','초과첨도')]
+        note='상세 분석에서 정규성·분포 형태 지표를 확인할 수 있습니다.'
+    else:
+        status=record['status']
+        method=record.get('test') or '검정 불가'
+        badge=STATUS_LABELS[status]+' · '+method
+        cards=[
+            _card('정규성 p값',pvalue_text(record['pvalue']),'',badge,
+                  f"유의수준 {record['alpha']:.2f}. AD p값은 유한 표본 보정을 적용한 근사값입니다. "
+                  +diagnostic_hint(record),'warn' if status=='rejected' else 'neutral'),
+            _card('왜도',fmt_value(record.get('skewness')),'','분포 형태 참고',
+                  '분석 대상 전체 개별값의 보정 표본 왜도. 양수는 오른쪽, 음수는 왼쪽 꼬리 경향입니다. 부호만으로 분포를 선택하지 않습니다.'),
+            _card('초과첨도',fmt_value(record.get('excess_kurtosis')),'','정규분포 기준 0',
+                  'Fisher 초과첨도(편향 보정). 정규분포 기준은 0이며 꼬리 형태의 참고값입니다. 유효값 4개 이상에서 표시합니다.'),
+        ]
+        note=(f"{record['scope']} · {record['scale']} · 전체 N={record['total_n']:,}, 검정 N={record['test_n']:,}. "
+              +diagnostic_hint(record))
+    return ('<style>.spc-grid-diagnostics{grid-template-columns:repeat(3,minmax(0,1fr));}'
+            '@media(max-width:640px){.spc-grid-diagnostics{grid-template-columns:1fr;}}</style>'
+            +_group('분포 진단 · 개별 측정값','원단위 · 분석 포함 데이터',cards,layout='diagnostics')
+            +'<p class="spc-card-note">'+escape(note)+'</p>')

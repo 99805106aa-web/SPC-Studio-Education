@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 spc_charts.py
 =============
@@ -603,18 +603,21 @@ def build_qq_plot(
     a = np.asarray(it['series'], dtype=float)
     a = a[np.isfinite(a)]
     valid = a.size >= 3 and np.ptp(a) > 0
-    skew = stats.skew(a, bias=False) if valid else np.nan
-    kurt = stats.kurtosis(a, fisher=True, bias=False) if valid else np.nan
+    from spc_normality import normality_diagnostics
+    diagnostic=it.get('normality_diagnostics',{}).get('transformed' if it.get('box_cox_applied') else 'individual')
+    diagnostic=diagnostic or normality_diagnostics(a)
+    skew = diagnostic.get('skewness')
+    kurt = diagnostic.get('excess_kurtosis')
     _distribution_metrics(fig, [('표본 수', f'{a.size:,}'), ('왜도', _fmt(skew)),
                                ('초과첨도', _fmt(kurt)), ('기준 분포', '정규분포')], C, ink)
     if valid:
-        from spc_core import _normality_sample, normality_message
+        from spc_core import _normality_sample
         (osm, osr), (slope, intercept, _) = stats.probplot(_normality_sample(a), dist='norm')
         ax.plot(osm, slope*osm+intercept, color=C['muted'], lw=1.4,
                 label='최소제곱 기준선', zorder=2)
         ax.scatter(osm, osr, s=20, color=C['primary'], alpha=.75,
                    edgecolors=C['ax_bg'], linewidths=.4, label='관측값', zorder=3)
-        summary = normality_message(a)
+        summary = diagnostic['message']
         verdict = ('정규성 이탈 신호 · 꼬리와 집단 혼합 여부를 확인하세요.' if '의심' in summary
                    else '유의수준 5%에서 정규성을 기각할 근거가 부족합니다.' if '만족' in summary
                    else '정규성 검정 불가 · 측정값과 검정 조건을 확인하세요.')

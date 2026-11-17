@@ -41,6 +41,20 @@ def render_assessment_settings(save_config):
 
 
 def render_result_review(it, save_config):
+    from spc_normality import STATUS_LABELS, pvalue_text
+    diagnostics=it.get('normality_diagnostics',{})
+    extra=[(name,record) for name,record in diagnostics.items() if name!='individual']
+    if extra:
+        with st.expander('부분군 평균·변환 후 정규성'):
+            for name,record in extra:
+                st.markdown(f"**{record['target']} · {record['scope']} · {record['scale']}**")
+                st.write(f"{STATUS_LABELS[record['status']]} · {record.get('test') or '검정 불가'} · "
+                         f"p={pvalue_text(record.get('pvalue'))} · 검정 N={record['test_n']:,}/전체 N={record['total_n']:,}")
+                st.caption(f"왜도 {record.get('skewness')} · 초과첨도 {record.get('excess_kurtosis')}")
+            st.caption('부분군 평균과 개별값의 정규성은 다를 수 있습니다. 원단위 평균 진단과 변환 후 개별값 진단도 서로 구분하세요.')
+    individual=diagnostics.get('individual',{})
+    if individual.get('status')=='rejected':
+        st.info('아래의 「비정규 분포 진단 · Pearson / G·Z 설정」에서 후보를 비교할 수 있습니다. 자동으로 분포를 선택하거나 전환하지 않습니다.')
     if it.get('box_cox_applied'):
         st.info(it['performance_note'])
         st.caption(f"원단위 규격 USL={it.get('original_usl')} / LSL={it.get('original_lsl')} · "
