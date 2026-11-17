@@ -96,6 +96,8 @@ def build_var_context(it: Dict[str, Any], beginner_mode: bool) -> Dict[str, Any]
         "cw": _to_float(it.get("cw")),
         "cwk": _to_float(it.get("cwk")),
         "within_overall_ratio": _to_float(it.get("within_overall_ratio")),
+        "within_estimator": it.get('within_estimator'),
+        "within_capability_note": it.get('within_capability_note', ''),
         "capability_status": str(it.get("capability_status", "재분석 필요")),
         "capability_reasons": list(it.get("capability_reasons", [])),
         "performance_note": str(it.get("performance_note", "")),

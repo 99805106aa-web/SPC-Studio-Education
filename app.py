@@ -2926,7 +2926,7 @@ with st.sidebar:
     | **Ppk** | 전체 변동 기준 성능 지수. 분포 모델과 공정 조건을 함께 확인 |
     | **Cpm** | 목표치(T) 반영 공정능력 지수. 평균이 목표치에서 멀수록 낮아짐 |
     | **Cpmk** | 목표치(T) + 규격 한쪽 치우침을 함께 반영한 공정능력 지수 |
-    | **Cw / Cwk** | 군내 변동에 기반한 공정 진단 지수. n≥2에서 계산하며 이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않음. Cp/Cpk와 별도로 군내 산포로 계산 |
+    | **Cw / Cwk** | 군내 변동 진단 지수. n=1은 MR̄/1.128 기반 앱 참고값, n≥2는 부분군 산포로 계산. 이 지수만으로 공정능력 충족을 판정하지 않음 |
     | **UCL/LCL** | 관리 상한/하한선 (평균 ± 3σ). 이 선을 벗어나면 이상 신호 |
     | **USL/LSL** | 규격 상한/하한선 (고객·도면 기준) |
     | **PPM** | 100만 개 생산 시 불량 예상 개수 |
@@ -2946,8 +2946,8 @@ with st.sidebar:
     - `Cpk = min((USL - μ)/(3s_overall), (μ - LSL)/(3s_overall)), 적용 조건 충족 시`
     - `Pp = (USL - LSL) / (6σ_overall)`
     - `Ppk = min((USL - μ)/(3σ_overall), (μ - LSL)/(3σ_overall))`
-    - `Cw = (USL - LSL)/(6σ_within), n≥2 진단용`
-    - `Cwk = min((USL - μ)/(3σ_within), (μ - LSL)/(3σ_within)), n≥2 진단용`
+    - `Cw = (USL - LSL)/(6σ_estimate), n=1 MR 참고 / n≥2 군내 진단`
+    - `Cwk = min((USL - μ)/(3σ_estimate), (μ - LSL)/(3σ_estimate)), n=1 MR 참고 / n≥2 군내 진단`
     - `Cpm = (USL - LSL) / (6√(σ_overall² + (μ - T)²))`
     - `Cpmk = min((USL - μ)/(3√(σ_overall² + (μ - T)²)), (μ - LSL)/(3√(σ_overall² + (μ - T)²)))`
 
@@ -3263,7 +3263,7 @@ if not st.session_state['analysis_done']:
 - **Xbar-R 관리도**: n=2~9일 때 부분군 평균-범위 관리도
 - **Xbar-S 관리도**: n≥10일 때 부분군 평균-표준편차 관리도 (자동 전환)
 - **I-MR 관리도**: n=1일 때 개별값-이동범위 관리도
-- **공정능력 지수**: Cp, Cpk, Pp, Ppk, Cpm, Cpmk (단측 규격 지원, 목표치 반영), Cw·Cwk (n≥2, 군내 능력 진단용)
+- **공정능력 지수**: Cp, Cpk, Pp, Ppk, Cpm, Cpmk (단측 규격 지원, 목표치 반영), Cw·Cwk (n=1 MR 기반 참고 / n≥2 군내 진단용)
 - **PPM 계산**: Within/Overall/실측 불량률
 - **KSQ 규칙 검출**: KS Q ISO 7870-2 T1~T8 규칙 위반점 표시
 - **정규성 검정**: Shapiro-Wilk (n≤50) / Anderson-Darling (n>50)
@@ -3746,7 +3746,7 @@ with tab_stab:
             else:
                 st.info("평가 가능한 항목이 없습니다. 규격과 Cwk·Ppk 계산 결과를 확인하세요.")
             if len(stab_rows) < len(results):
-                st.caption("평가 제외: Ppk 또는 Cwk/Ppk 비율을 계산할 수 없는 항목입니다(n=1 포함). Ppk가 0인 경우에도 비율은 정의되지 않습니다.")
+                st.caption("평가 제외: Ppk 또는 Cwk/Ppk 비율을 계산할 수 없는 항목입니다. Ppk=0이나 유효 산포가 없을 때는 비율이 정의되지 않습니다. n=1의 비율은 MR 진단 참고입니다.")
         except Exception as e:
             st.error(f"안정성 산점도 생성 실패: {e}")
         st.markdown("""
@@ -4331,7 +4331,7 @@ with tab_ctrl:
                 ("목표치(T)", _num(it.get('target', np.nan)), "muted"),
                 ("운영 모드", str(it.get('control_phase_label', '해석용')), "muted"),
                 ("Cp / Cpk", f"{_num(it.get('cp', np.nan))} / {_num(it.get('cpk', np.nan))}", _cpk_cls),
-                ("Cw / Cwk (진단용)", f"{_num(it.get('cw', np.nan))} / {_num(it.get('cwk', np.nan))}", "muted"),
+                ("Cw / Cwk (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cw / Cwk (진단용)", f"{_num(it.get('cw', np.nan))} / {_num(it.get('cwk', np.nan))}", "muted"),
                 ("Pp / Ppk", f"{_num(it.get('pp', np.nan))} / {_num(it.get('ppk', np.nan))}", _ppk_cls),
                 ("Cpm / Cpmk", f"{_num(it.get('cpm', np.nan))} / {_num(it.get('cpmk', np.nan))}", _cpmk_cls),
             ]

@@ -223,8 +223,8 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
         ("PPM(Ppk, 모델 참고)", _report_fmt_ppm_int(it.get("ppm_ppk", np.nan)), ""),
         ("Cpm", _report_fmt_value(it.get("cpm", np.nan)), _report_metric_cls(it.get("cpm", np.nan), it)),
         ("Cpmk", _report_fmt_value(it.get("cpmk", np.nan)), _report_metric_cls(it.get("cpmk", np.nan), it)),
-        ("Cw (진단용)", _report_fmt_value(it.get("cw", np.nan)), ""),
-        ("Cwk (진단용)", _report_fmt_value(it.get("cwk", np.nan)), ""),
+        ("Cw (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cw (진단용)", _report_fmt_value(it.get("cw", np.nan)), ""),
+        ("Cwk (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cwk (진단용)", _report_fmt_value(it.get("cwk", np.nan)), ""),
         ("규격 이탈", f"{spec_v:,}", "bad" if spec_v > 0 else "good"),
         ("관리 이탈", f"{ctrl_v:,}", "bad" if ctrl_v > 0 else "good"),
         ("USL (원단위)" if it.get('box_cox_applied') else "USL", _report_fmt_value(it.get("original_usl" if it.get('box_cox_applied') else "usl", np.nan)), ""),
@@ -596,8 +596,8 @@ def export_summary_excel(
     ws_note.append(["항목", "설명"])
     ws_note.append(["Cw·Cwk", WITHIN_CAPABILITY_NOTICE])
     ws_note.append(["계산식", "Cw=(USL−LSL)/(6σw); Cwk=min((USL−평균)/(3σw), (평균−LSL)/(3σw))"])
-    ws_note.append(["적용", "n≥2. Cw는 양측 규격, Cwk는 최소 한쪽 규격이 필요합니다."])
-    ws_note.append(["추정 방법", "2≤n≤9: R̄/d₂; n≥10: s̄/c₄. 기존 분석의 전처리·변환·기준구간을 적용합니다."])
+    ws_note.append(["적용", "n=1은 MR 기반 앱 참고값, n≥2는 군내 진단. Cw는 양측 규격, Cwk는 최소 한쪽 규격이 필요합니다."])
+    ws_note.append(["추정 방법", "n=1: MR̄/1.128; 2≤n≤9: R̄/d₂; n≥10: √mean(s²). 관리용 모드는 기준구간 산포와 전체 평균을 사용합니다. Box–Cox 군내 지수는 미적용입니다."])
     ws_note.column_dimensions['A'].width = 18
     ws_note.column_dimensions['B'].width = 90
     for row in ws_note.iter_rows():
@@ -608,7 +608,7 @@ def export_summary_excel(
     ws_review = wb.create_sheet('평가·검토')
     ws_review.append(['변수', '항목', '값'])
     for it in results:
-        for key in ('assessment_settings','sequence_review','capability_confidence','study_conclusion','outlier_info',
+        for key in ('assessment_settings','sequence_review','capability_confidence','study_conclusion','outlier_info','within_estimator','within_capability_note',
                     'dispersion_limit_method','capability_quantile_scale','capability_quantiles'):
             value = it.get(key)
             ws_review.append([str(it['column']),key,json.dumps(value,ensure_ascii=False,default=str) if isinstance(value,(dict,list)) else value])

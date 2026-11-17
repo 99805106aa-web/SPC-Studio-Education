@@ -94,10 +94,10 @@ def _index_card(label, value, help_text, context='', it=None):
     return _card(label, _index_text(value, it), '', badge, help_text, state)
 
 
-def _card(label, value, subtitle, badge, help_text, state="neutral", status_value=False):
+def _card(label, value, subtitle, badge, help_text, state="neutral", status_value=False, metric_name=None):
     value_cls = "spc-kpi-value" + (" spc-value-status" if status_value else "")
     return (
-        f'<article class="spc-kpi spc-state-{state}" data-metric="{escape(label, quote=True)}">'
+        f'<article class="spc-kpi spc-state-{state}" data-metric="{escape(metric_name or label, quote=True)}">'
         f'<div class="spc-kpi-head"><span class="spc-kpi-label">{escape(label)}</span>'
         f'<details class="spc-help"><summary aria-label="{escape(label, quote=True)} 계산 설명">?</summary>'
         f'<p>{escape(help_text)}</p></details></div>'
@@ -122,6 +122,7 @@ def process_metric_cards_html(it):
     performance_note = it.get('performance_note', '전체 산포의 정규모델 가정 참고값입니다.')
     within_note = it.get('within_capability_note', '재분석이 필요합니다.')
     nonnormal = it.get('distribution_mode') == 'nonnormal'
+    mr_reference = it.get('within_estimator') == 'moving_range' and not it.get('box_cox_applied')
     method = '.' + it.get('capability_method', 'G') if nonnormal or it.get('box_cox_applied') else ''
     def index_card(*args, **kwargs):
         return _index_card(*args, it=it, **kwargs)
@@ -129,7 +130,8 @@ def process_metric_cards_html(it):
     stats = [
         _card('평균 μ', fmt_value(it.get('mu')), '', '', '분석 데이터의 평균입니다.'),
         _card('σ 전체', fmt_value(it.get('std_all')), '', '', '전체 분석 데이터의 표본표준편차입니다.'),
-        _card('σ 군내', fmt_value(it.get('std_within')), '', '', '부분군 내 산포 추정값입니다.'),
+        _card('σ MR' if mr_reference else 'σ 군내', fmt_value(it.get('std_within')), '', '',
+              '연속 유효값의 MR̄/1.128 추정값입니다. 실제 부분군 내 산포와 구분하세요.' if mr_reference else '부분군 내 산포 추정값입니다.'),
         _card('X-UCL', fmt_value(it.get('ucl')), '', '', 'X/Xbar 관리상한입니다. 고객·도면 규격과 구분하세요.'),
         _card('X-LCL', fmt_value(it.get('lcl')), '', '', 'X/Xbar 관리하한입니다. 고객·도면 규격과 구분하세요.'),
         _card(f'{kind}-UCL', fmt_value(it.get('r_ucl')), '', '', f'{kind} 산포 관리상한입니다.'),
@@ -150,10 +152,10 @@ def process_metric_cards_html(it):
     primary.extend([
         index_card('Pp'+method, it.get('pp'), performance_note, '참고'),
         index_card('Ppk'+method, it.get('ppk'), performance_note, '참고'),
-        index_card('Cw', it.get('cw'), within_note, '진단'),
-        index_card('Cwk', it.get('cwk'), within_note, '진단'),
+        _card('Cw (MR 참고)', _index_text(it.get('cw')), '', 'MR 기반 · 진단용', within_note, metric_name='Cw') if mr_reference else index_card('Cw', it.get('cw'), within_note, '진단'),
+        _card('Cwk (MR 참고)', _index_text(it.get('cwk')), '', 'MR 기반 · 진단용', within_note, metric_name='Cwk') if mr_reference else index_card('Cwk', it.get('cwk'), within_note, '진단'),
     ])
-    groups.append(_group('능력 · 성능 지표', 'Cp·Cpk / Pp·Ppk: 전체 변동  ·  Cw·Cwk: 군내 진단',
+    groups.append(_group('능력 · 성능 지표', 'Cp·Cpk / Pp·Ppk: 전체 변동  ·  Cw·Cwk: MR 기반 참고' if mr_reference else 'Cp·Cpk / Pp·Ppk: 전체 변동  ·  Cw·Cwk: 군내 진단',
                          primary, layout='primary'))
     secondary = []
     for key, label in [('cpm','Cpm'),('cpmk','Cpmk')]:
@@ -163,7 +165,7 @@ def process_metric_cards_html(it):
     secondary.extend([
         _card('|Cwk/Ppk|', fmt_value(it.get('within_overall_ratio')), '', '',
               '군내/전체 지수 비율입니다. 이 값만으로 안정성을 확정하지 않습니다. Ppk=0 또는 Cwk 미계산 시 표시하지 않습니다.'),
-        _card('PPM(Cwk)', _ppm(it.get('ppm_within')), '', '미적용' if nonnormal else '', within_note + ' 군내 산포의 정규모델 가정 예상 PPM입니다. n≥2에서 계산하는 진단용 참고값입니다.'),
+        _card('PPM(MR 참고)' if mr_reference else 'PPM(Cwk)', _ppm(it.get('ppm_within')), '', 'MR 정규모형 참고' if mr_reference else '미적용' if nonnormal else '', within_note + ' 산포 추정값의 정규모형 가정 예상 PPM이며 선택 분포의 PPM과 구분합니다.', metric_name='PPM(Cwk)'),
         _card('PPM(적합분포)' if nonnormal else 'PPM(전체)', _ppm(it.get('ppm_ppk')), '', '', performance_note),
     ])
     groups.append(_group('목표치 · 변동 비교 · 예상 PPM',
@@ -173,6 +175,8 @@ def process_metric_cards_html(it):
         groups.append('<p class="spc-card-note">' + escape(f'Cp·Cpk: {cap_status} · {reasons}') + '</p>')
     if nonnormal:
         groups.append('<p class="spc-card-note">' + escape(it.get('chart_mode', '') + ' · ' + it.get('pearson_rules_note', '')) + '</p>')
+    if mr_reference:
+        groups.append('<p class="spc-card-note">'+escape(within_note)+'</p>')
     return METRIC_CARD_CSS + '<div class="spc-metrics">' + ''.join(groups) + '</div>'
 
 

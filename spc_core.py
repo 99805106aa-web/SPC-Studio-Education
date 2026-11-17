@@ -48,13 +48,14 @@ _d2_mr = 1.128  # I-MR에서 MRbar→σ 변환
 NORMALITY_MAX = 10000
 NORMALITY_SW_CUTOFF = 50  # n<=50: Shapiro-Wilk, 초과: Anderson-Darling
 
-CALCULATION_VERSION = "2026.11.17.5"
+CALCULATION_VERSION = "2026.11.17.6"
 WITHIN_CAPABILITY_NOTICE = (
     "Cw·Cwk는 군내 변동에 기반한 공정 진단 지수입니다. "
     "이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않습니다. "
     "합리적 부분군과 군내 정규성을 가정합니다. Cp·Cpk와 Pp·Ppk는 전체 변동을 사용하며, "
     "Cp·Cpk는 관측 구간의 적용 조건이 충족될 때만 표시합니다. "
     "Cwk/Ppk 비율만으로 공정 안정성을 확정할 수 없습니다."
+    " n=1의 Cw·Cwk는 연속 유효값의 MR̄/1.128에 기반한 앱의 진단용 참고값이며 실제 부분군 내 산포와 구분합니다."
 )
 OUTLIER_METHOD_IQR = "iqr"
 OUTLIER_METHOD_QUANTILE = "quantile"
@@ -980,33 +981,37 @@ def analyze_column(
     # Compute within capability independently of overall capability eligibility.
     cw = cwk = ppm_within = np.nan
     within_notes = []
+    within_estimator = 'moving_range' if n == 1 else 'subgroup_rms' if use_s_chart else 'subgroup_range'
     if n == 1:
-        within_notes.append("n=1은 부분군 내 산포를 정의할 수 없어 Cw·Cwk 계산 제외")
+        within_notes.append("n=1: MR 기반 진단용 참고값; σMR=MR̄/1.128; 실제 부분군 내 산포와 구분")
+        within_notes.append("정규·독립 관측 가정의 참고 계산이며 이 값으로 공정능력 충족을 판정하지 않습니다")
+        if len(source_indices)>1 and np.any(np.diff(source_indices)!=1):
+            within_notes.append("결측·제외로 원본 순서가 단절됨: 연속 유효값 MR의 시간 간격·독립성 재검토 필요")
     else:
         within_notes.append("σw 추정: " + ("√mean(s²)" if use_s_chart else "R̄/d₂"))
-        if detail_level != "full":
-            within_notes.append("상세(full) 분석에서 계산")
-        elif capability_unavailable:
-            within_notes.append("규격 변환 불가로 Cw·Cwk 계산 제외")
-        elif not np.isfinite(sigma_within) or sigma_within <= 0:
-            within_notes.append("군내 산포가 0이거나 유효하지 않아 Cw·Cwk 계산 제외")
-        else:
-            cw = safe_div(usl - lsl, 6 * sigma_within)
-            distances = []
-            if np.isfinite(usl):
-                distances.append(usl - mu)
-            if np.isfinite(lsl):
-                distances.append(mu - lsl)
-            if distances:
-                cwk = min(distances) / (3 * sigma_within)
-            ppm_within = ppm_by_sigma(mu, sigma_within, usl, lsl)
-            if not (np.isfinite(usl) and np.isfinite(lsl)):
-                within_notes.append("Cw는 양측 규격 필요")
-            if not (np.isfinite(usl) or np.isfinite(lsl)):
-                within_notes.append("Cwk는 최소 한쪽 규격 필요")
-        within_notes.append(f"산포 기준: {limit_reference_label}; 평균 기준: 전체 분석 데이터")
-        if outlier_info.get("count", 0) > 0 or box_cox_applied:
-            within_notes.append("전처리/변환 후 데이터 및 규격 기준")
+    if detail_level != "full":
+        within_notes.append("상세(full) 분석에서 계산")
+    elif capability_unavailable:
+        within_notes.append("규격 변환 불가로 Cw·Cwk 계산 제외")
+    elif not np.isfinite(sigma_within) or sigma_within <= 0:
+        within_notes.append("군내 산포가 0이거나 유효하지 않아 Cw·Cwk 계산 제외")
+    else:
+        cw = safe_div(usl - lsl, 6 * sigma_within)
+        distances = []
+        if np.isfinite(usl):
+            distances.append(usl - mu)
+        if np.isfinite(lsl):
+            distances.append(mu - lsl)
+        if distances:
+            cwk = min(distances) / (3 * sigma_within)
+        ppm_within = ppm_by_sigma(mu, sigma_within, usl, lsl)
+        if not (np.isfinite(usl) and np.isfinite(lsl)):
+            within_notes.append("Cw는 양측 규격 필요")
+        if not (np.isfinite(usl) or np.isfinite(lsl)):
+            within_notes.append("Cwk는 최소 한쪽 규격 필요")
+    within_notes.append(f"산포 기준: {limit_reference_label}; 평균 기준: 전체 분석 데이터")
+    if outlier_info.get("count", 0) > 0 or box_cox_applied:
+        within_notes.append("전처리/변환 후 데이터 및 규격 기준")
     within_capability_note = "; ".join(within_notes)
     within_overall_ratio = (
         abs(cwk / ppk) if np.isfinite(cwk) and np.isfinite(ppk) and ppk != 0 else np.nan
@@ -1165,7 +1170,7 @@ def analyze_column(
     )
     if normality_suspect or "만족" not in norm_msg:
         performance_note += " 비정규 의심 또는 정규성 미확인: 모델 검토 전 능력 판정에 사용하지 마세요."
-        within_capability_note += "; 군내 정규성은 별도 확인 필요"
+        within_capability_note += ("; MR 정규모형 가정 미확인: 비정규 의심 자료의 Cwk·PPM은 해석 주의가 필요한 참고값" if n == 1 else "; 군내 정규성은 별도 확인 필요")
 
     result = dict(
         calculation_version=CALCULATION_VERSION,
@@ -1280,9 +1285,16 @@ def analyze_column(
         reliability_reasons=reliability_reasons,
         reliability_reason_text=", ".join(reliability_reasons),
     )
+    result['within_estimator'] = within_estimator
+    mr_reference = {key: result[key] for key in ('std_within','cw','cwk','ppm_within','within_capability_note')} if n == 1 and not box_cox_applied else None
     if distribution_config['mode'] == 'nonnormal':
         from spc_nonnormal import apply_analysis
         result = apply_analysis(result, distribution_config)
+        if mr_reference is not None:
+            result.update(mr_reference)
+            result['within_capability_note'] += '; 선택 분포의 G/Z와 별개인 정규식 MR 참고 계산'
+            result['within_overall_ratio'] = abs(result['cwk']/result['ppk']) if np.isfinite(result['cwk']) and np.isfinite(result['ppk']) and result['ppk'] != 0 else np.nan
+            result['stab_ratio'] = result['within_overall_ratio']
     result['dispersion_limit_method'] = ('AIAG–VDA 9.3.3.2 · √mean(s²), χ² 정확 한계' if use_s_chart
         else result.get('dispersion_limit_method', 'Shewhart R/MR · D3/D4 근사 한계'))
     if box_cox_applied and not capability_unavailable and detail_level == 'full':
@@ -1719,6 +1731,8 @@ def run_full_analysis(
                 'Cpmk': fmt_value(it['cpmk']),
                 'Cw': fmt_value(it['cw']),
                 'Cwk': fmt_value(it['cwk']),
+                'Cw·Cwk 산포 추정': it.get('within_estimator', ''),
+                'Cw·Cwk 해석 안내': it.get('within_capability_note', ''),
                 '목표치(T)': fmt_value(it['target'], 3),
                 '군내/전체 지수 비율(Cwk/Ppk)': fmt_value(it['within_overall_ratio']),
                 '능력 적용 상태': it['capability_status'],
