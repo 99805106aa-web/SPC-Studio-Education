@@ -13,6 +13,7 @@ from attr_presentation import (PRESENTATION_CSS, build_attribute_report, core_me
                                metrics_html, render_result_table, result_frame, signal_summary)
 from spc_access import education_mode, ensure_active_day
 from spc_chart_guide import ATTRIBUTE_CHARTS, render_chart_guide, render_studio_header
+from spc_education import ATTRIBUTE_LIMIT_SAMPLE, SAMPLE_FILE_NAME, SAMPLE_OPTIONS, render_samples, sample_workbook
 from spc_export import fig_to_bytes
 
 
@@ -29,31 +30,23 @@ def _on_upload():
     accept_attribute_upload(st.session_state, upload.name if upload else "", upload.getvalue() if upload else None)
 
 
-def _load_limit_example():
-    ensure_active_day()
-    state = st.session_state
-    state.pop('_attr_upload', None)
-    frame = pd.DataFrame({'defects': [1] * 25 + [5, 6], 'sample_size': [100] * 27})
-    accept_attribute_upload(state, 'SPC_교육_계수형_한계비교.csv', frame.to_csv(index=False).encode())
-    state.update(_attr_chart='p', _attr_input_phase='phase2', _attr_input_baseline=25)
-
-
 TUTORIAL_BASELINE = 20
 
 
-def load_attribute_tutorial_sample(chart):
+def load_attribute_tutorial_sample(scenario):
     ensure_active_day()
     state = st.session_state
     state.pop('_attr_upload', None)
-    variable_exposure = chart in ('p', 'u')
-    counts = ([1, 3, 2, 5] if variable_exposure else [1, 2, 3, 2]) * 5
-    frame = pd.DataFrame({'defects': [*counts, 2, 18 if variable_exposure else 12]})
-    if chart != 'c':
-        sizes = {'p': [100, 200], 'np': [100, 100], 'u': [1, 2]}[chart]
-        frame['sample_size'] = sizes * (len(frame) // 2)
-    name = f'SPC_교육_{chart}_관리도_실습.csv'
-    accept_attribute_upload(state, name, frame.to_csv(index=False).encode())
-    state.update(_attr_chart=chart, _attr_tutorial_example=chart, _attr_input_phase='phase2')
+    raw = sample_workbook()
+    accept_attribute_upload(state, SAMPLE_FILE_NAME, raw)
+    limit_comparison = scenario == ATTRIBUTE_LIMIT_SAMPLE
+    chart = 'p' if limit_comparison else scenario
+    state.update(_spc_analysis_kind='attribute', _attr_chart=chart, _attr_input_phase='phase2',
+                 _attr_input_sheet=SAMPLE_OPTIONS[scenario][1],
+                 _attr_input_baseline=25 if limit_comparison else TUTORIAL_BASELINE)
+    if not limit_comparison:
+        state['_attr_tutorial_example'] = chart
+    state.pop('_guide_attribute_run', None)
     state[f'_attr_input_{chart}_defect'] = 'defects'
     if chart != 'c':
         state[f'_attr_input_{chart}_size'] = 'sample_size'
@@ -205,9 +198,7 @@ def render_attribute_studio():
         if chart:
             st.caption(ATTRIBUTE_CHARTS[chart].name)
         guide_slot = st.empty()
-        if education_mode():
-            st.button('계수형 한계 비교 예제 불러오기', on_click=_load_limit_example, width='stretch',
-                      help='기준 부분군 25개를 고정하고 p 관리도의 직접 계산과 정규근사를 비교하세요.')
+        render_samples(expanded=education_mode())
         st.file_uploader("계수형 Excel / CSV 업로드", type=["xlsx", "xls", "csv"],
                          key="_attr_upload", on_change=_on_upload)
         if upload:

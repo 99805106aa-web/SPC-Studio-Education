@@ -229,7 +229,7 @@ def _pearson_inputs_ready(state, frame, n):
 
 
 def _render_pearson_recommendation(planned_n, ready, frame):
-    from spc_education import PEARSON_SAMPLE_PATH
+    from spc_education import PEARSON_SAMPLE_SHEET
 
     state = st.session_state
     st.success('추천 검토 대상 · 피어슨 관리도')
@@ -259,7 +259,7 @@ def _render_pearson_recommendation(planned_n, ready, frame):
     st.write('정규성 검정 결과와 함께 히스토그램, Q-Q 플롯, 후보 분포 적합도, 공정에서 가능한 값의 범위를 검토해 적용할 분포를 선택하세요.')
     example_grouping = ('개별 측정값을 사용합니다.' if chart == 'imr' else
                         f'실습에서는 파일 순서대로 {subgroup_size}개씩 묶어 봅니다. 내 데이터의 부분군은 같은 시점과 조건에서 함께 측정한 값으로 구성하세요.')
-    st.caption(f'{PEARSON_SAMPLE_PATH.name} · 평면도 측정값 500개. {example_grouping}')
+    st.caption(f'통합 예제 · {PEARSON_SAMPLE_SHEET} 시트 · 평면도 측정값 500개. {example_grouping}')
     st.button('피어슨 예제 불러오기 · 분포 진단 준비', key='guide_tutorial_pearson',
               on_click=_prepare_pearson, args=(chart, subgroup_size), kwargs={'use_example': True})
     wide = state.get('data_layout_mode') == 'wide_subgroup_cols'
@@ -300,10 +300,11 @@ def _render_tutorial_recommendation(chart, attribute, selected, planned_n, ready
         st.markdown(f"**부분군 크기** · {planned_n}개")
     st.markdown(f"**표시값** · {plots}  \n**데이터 준비** · {inputs}")
     if chart == EXTENDED_MODE:
-        from spc_education import EXTENDED_SAMPLE_BASELINE, EXTENDED_SAMPLE_N, EXTENDED_SAMPLE_PATH, load_sample
+        from spc_education import EXTENDED_SAMPLE_BASELINE, EXTENDED_SAMPLE_N, EXTENDED_SAMPLE_SHEET, load_sample
 
         example = state.get('_education_extended_data')
-        example_loaded = bool(example and example == state.get('data_bytes'))
+        example_loaded = bool(example and example == state.get('data_bytes')
+                              and state.get('data_sheet') == EXTENDED_SAMPLE_SHEET)
         example_applied = (example_loaded and selected == chart and _current_group_size(state) == EXTENDED_SAMPLE_N
                            and state.get('baseline_subgroups') == EXTENDED_SAMPLE_BASELINE
                            and not chart_selection_error(state))
@@ -316,7 +317,7 @@ def _render_tutorial_recommendation(chart, attribute, selected, planned_n, ready
             st.caption('내 데이터로 분석하려면 왼쪽에서 파일을 올리세요.')
         st.button('확장 슈하르트 예제 불러오기', key='guide_tutorial_apply', on_click=load_sample,
                   args=(chart,), disabled=example_applied)
-        st.caption(f'예제는 {EXTENDED_SAMPLE_PATH.name}의 외경을 사용합니다. 부분군 크기는 {EXTENDED_SAMPLE_N}개, 초기 기준 부분군은 {EXTENDED_SAMPLE_BASELINE}개입니다.')
+        st.caption(f'예제는 통합 예제의 ‘{EXTENDED_SAMPLE_SHEET}’ 시트에서 외경을 사용합니다. 부분군 크기는 {EXTENDED_SAMPLE_N}개, 초기 기준 부분군은 {EXTENDED_SAMPLE_BASELINE}개입니다.')
         if example_loaded:
             st.caption(f'현재 예제 설정 · 부분군 크기 {_current_group_size(state)}개 · 초기 기준 부분군 {state.get("baseline_subgroups")}개')
         applied = applied or (example_loaded and selected == chart and not chart_selection_error(state))
@@ -391,9 +392,9 @@ def _render_practice(attribute):
         if answer == correct:
             st.success(reason)
             if correct == EXTENDED_MODE:
-                from spc_education import EXTENDED_SAMPLE_PATH, load_sample
+                from spc_education import EXTENDED_SAMPLE_SHEET, load_sample
                 st.button("확장 슈하르트 예제 불러오기", on_click=load_sample, args=(correct,))
-                st.caption(f"{EXTENDED_SAMPLE_PATH.name}을 불러온 뒤 왼쪽의 ‘분석 시작’을 누르세요.")
+                st.caption(f"통합 예제의 ‘{EXTENDED_SAMPLE_SHEET}’ 시트를 불러온 뒤 왼쪽의 ‘분석 시작’을 누르세요.")
             else:
                 imr_blocked = _imr_layout_blocked(correct, st.session_state)
                 st.button("이 관리도로 분석 준비", on_click=_select_attribute_chart if attribute else _select_chart,
