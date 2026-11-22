@@ -1024,7 +1024,7 @@ from spc_mode_ui import (preserve_settings, beginner_inputs, beginner_conditions
 from spc_metric_ui import process_metric_cards_html, STATUS_CELL_STYLES
 from spc_distribution_ui import render_distribution_panel
 from spc_extended_ui import render_extended, with_extended_results
-from spc_extended import EXTENDED_MODE, TITLE as EXTENDED_TITLE
+from spc_extended import EXTENDED_MODE, TITLE as EXTENDED_TITLE, display_panels, monitor_signals, unsupported_reason
 from spc_chart_guide import chart_selection_error, chart_selection_label, render_chart_guide, render_studio_header
 from spc_education import render_ocap_exercise, render_samples
 
@@ -1332,6 +1332,18 @@ html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-
     color: #0f172a;
     font-family: "Consolas", "Roboto Mono", monospace;
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.stats-limit-reference {
+    margin: 0.35rem 0 0.55rem;
+    color: #475569;
+    font-size: 0.78rem;
+    word-break: keep-all;
+}
+.stats-limits .stats-kv {
+    table-layout: fixed;
+}
+.stats-limits .stats-kv td:first-child {
     white-space: nowrap;
 }
 .stats-val {
@@ -2461,6 +2473,32 @@ def _render_distribution_detail(it, _vi, palette):
             st.error(f"QQ 플롯 오류: {e}")
 
 
+def _render_extended_diagnostics(it):
+    st.markdown("**확장 슈하르트 관리한계 진단**")
+    result = it.get("extended_shewhart")
+    if result is None:
+        reason = it.get("extended_shewhart_error") or unsupported_reason(it)
+        st.info(reason or "확장 슈하르트 관리도 화면에서 확장 관리도 설정을 적용하면 진단을 확인할 수 있습니다.")
+        return
+
+    table = result["table"]
+    rows = []
+    for phase, label in (("감시", "감시구간"), ("기준", "초기 기준구간")):
+        period = table[table["구간"] == phase]
+        if period.empty:
+            continue
+        for name, _ in reversed(display_panels()):
+            decisions = period[name + " 판정"]
+            above = int(decisions.eq("상한 초과").sum())
+            below = int(decisions.eq("하한 미달").sum())
+            rows.append({"구간": label, "관리도": name, "부분군 수": len(period),
+                         "UCL 초과": above, "LCL 미달": below, "이탈 합계": above + below})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption("차트와 같은 관리한계로 판정합니다. 감시구간에서는 S의 산포 이탈을 먼저 확인하세요.")
+    if not table["구간"].eq("감시").any():
+        st.info("감시구간 데이터가 없습니다.")
+
+
 def _render_statistics_detail(it):
     ppm_w, ppm_o, ppm_e = it.get('ppm_within', np.nan), it['ppm_ppk'], it['emp_ppm']
     _is_xmr = bool(it.get('is_xmr', False))
@@ -2474,7 +2512,8 @@ def _render_statistics_detail(it):
     _disp_lcl_applicable = not (_disp_kind == "R" and int(it.get('n', 0)) <= 6)
     if it.get('distribution_mode') == 'nonnormal':
         _disp_lcl_applicable = int(it.get('n', 0)) > 1
-    _ksq_c = it.get('ksq_counts', {})
+    extended = it.get('chart_usage_mode') == EXTENDED_MODE
+    extended_result = it.get('extended_shewhart') if extended else None
     _norm_msg = str(it.get('norm_msg', '정규성 검정 결과 없음'))
     _n_valid = int(np.isfinite(np.asarray(it.get('series', []), dtype=float)).sum())
     _series_vals = np.asarray(it.get('series', []), dtype=float)
@@ -2599,7 +2638,9 @@ def _render_statistics_detail(it):
             return "warn"
         return "good"
 
-    def _kv_block(title: str, rows, extra_class: str = "") -> str:
+    def _kv_block(title: str, rows, extra_class: str = "", *, reference=None) -> str:
+        reference_html = (f"<div class='stats-limit-reference'><strong>한계 기준</strong> · {html.escape(reference)}</div>"
+                          if reference else "")
         _rows_html = []
         for _row in rows:
             if len(_row) >= 3:
@@ -2619,7 +2660,7 @@ def _render_statistics_detail(it):
         return (
             f"<div class='{_block_class}'>"
             f"<div class='stats-title'>{title}</div>"
-            f"<table class='stats-kv'>{_rows}</table>"
+            f"{reference_html}<table class='stats-kv'>{_rows}</table>"
             f"</div>"
         )
 
@@ -2680,32 +2721,48 @@ def _render_statistics_detail(it):
         ("USL (원단위)" if it.get('box_cox_applied') else "USL", _num(it.get('original_usl' if it.get('box_cox_applied') else 'usl', np.nan)), "muted"),
         ("LSL (원단위)" if it.get('box_cox_applied') else "LSL", _num(it.get('original_lsl' if it.get('box_cox_applied') else 'lsl', np.nan)), "muted"),
         ("목표치(T)", _num(it.get('target', np.nan)), "muted"),
-        ("운영 모드", str(it.get('control_phase_label', '해석용')), "muted"),
+        ("운영 모드", "확장 슈하르트" if extended else str(it.get('control_phase_label', '해석용')), "muted"),
         *_selected_rows,
         *_within_rows,
         ("Cpm (목표치 고려)", _num(it.get('cpm', np.nan)), _cp_level(it.get('cpm', np.nan), 'cpm')),
         ("Cpmk (목표치·치우침 고려)", _num(it.get('cpmk', np.nan)), _cp_level(it.get('cpmk', np.nan), 'cpmk')),
     ]
     _spec_v = int(it.get('spec_violation_count', 0))
-    _x_v, _r_v = _get_ctrl_counts(it)
     _ppm_rows = [
         ("PPM(Within)", _ppm(ppm_w), _ppm_level(ppm_w)),
         ("PPM(Overall)", _ppm(ppm_o), _ppm_level(ppm_o)),
         ("PPM(실측)", _ppm(ppm_e), _ppm_level(ppm_e)),
         ("규격 이탈", f"{_spec_v:,} 건", "bad" if _spec_v > 0 else "good"),
-        (f"{_x_lab} 이탈", f"{_x_v:,} 건", "bad" if _x_v > 0 else "good"),
-        (f"{_disp_kind_label} 이탈", f"{_r_v:,} 건", "bad" if _r_v > 0 else "good"),
     ]
-    _ctrl_rows = [
-        ("한계 기준", str(it.get('limit_reference_label', '전체 데이터')), "muted"),
-        (f"{_x_lab}-CL", _num(it.get('xbarbar', np.nan)), "muted"),
-        (f"{_x_lab}-UCL", _num(it.get('ucl', np.nan)), "muted"),
-        (f"{_x_lab}-LCL", _num(it.get('lcl', np.nan)), "muted"),
-        (f"{_disp_kind_label}-CL", _num(it.get('r_bar', np.nan)), "muted"),
-        (f"{_disp_kind_label}-UCL", _num(it.get('r_ucl', np.nan)), "muted"),
-    ]
-    if _disp_lcl_applicable:
-        _ctrl_rows.append((f"{_disp_kind_label}-LCL", _num(it.get('r_lcl', np.nan)), "muted"))
+    if extended:
+        _ctrl_rows = []
+        _reference = "확장 관리도 설정 필요"
+        if extended_result is not None:
+            _reference = str(extended_result["reference"] or f"초기 기준 부분군 {extended_result['count']:,}개")
+            signals = monitor_signals(extended_result)
+            for name, _ in reversed(display_panels()):
+                count = int(signals[name].sum())
+                tally = f"{count:,} / {len(signals):,}개" if not signals.empty else "—"
+                _ppm_rows.append((f"{name} 이탈", tally, "muted" if signals.empty else "bad" if count else "good"))
+                lower, center, upper = extended_result["limits"][name]
+                _ctrl_rows.extend((f"{name} {label}", f"{value:.8g}", "muted")
+                                  for label, value in (("CL", center), ("UCL", upper), ("LCL", lower)))
+    else:
+        _x_v, _r_v = _get_ctrl_counts(it)
+        _ppm_rows.extend([
+            (f"{_x_lab} 이탈", f"{_x_v:,} 건", "bad" if _x_v > 0 else "good"),
+            (f"{_disp_kind_label} 이탈", f"{_r_v:,} 건", "bad" if _r_v > 0 else "good"),
+        ])
+        _reference = str(it.get('limit_reference_label', '전체 데이터'))
+        _ctrl_rows = [
+            (f"{_x_lab} CL", _num(it.get('xbarbar', np.nan)), "muted"),
+            (f"{_x_lab} UCL", _num(it.get('ucl', np.nan)), "muted"),
+            (f"{_x_lab} LCL", _num(it.get('lcl', np.nan)), "muted"),
+            (f"{_disp_kind} CL", _num(it.get('r_bar', np.nan)), "muted"),
+            (f"{_disp_kind} UCL", _num(it.get('r_ucl', np.nan)), "muted"),
+        ]
+        if _disp_lcl_applicable:
+            _ctrl_rows.append((f"{_disp_kind} LCL", _num(it.get('r_lcl', np.nan)), "muted"))
     _basic_rows_core = [
         ("최소", _num(_min_v), "muted"),
         ("최대", _num(_max_v), "muted"),
@@ -2742,7 +2799,8 @@ def _render_statistics_detail(it):
     with d2:
         st.markdown(_kv_block("불량률 및 이탈 집계", _ppm_rows), unsafe_allow_html=True)
     with d3:
-        st.markdown(_kv_block("관리한계선 파라미터", _ctrl_rows), unsafe_allow_html=True)
+        st.markdown(_kv_block("관리한계선 파라미터", _ctrl_rows, "stats-limits", reference=_reference),
+                    unsafe_allow_html=True)
     with d4:
         st.markdown(_kv_block("기초 통계량", _basic_rows_core), unsafe_allow_html=True)
 
@@ -2754,32 +2812,36 @@ def _render_statistics_detail(it):
     with a3:
         st.markdown(_kv_block("분포 형상/능력 CI", _aux_rows_shape_ci, "stats-block-compact"), unsafe_allow_html=True)
 
-    _ksq_total = sum(int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9))
-    _ksq_df = pd.DataFrame([{f'T{j}': int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9)}], index=["위반 건수"])
-    if it.get('distribution_mode') == 'nonnormal':
-        st.caption(it.get('pearson_rules_note', ''))
-        _ksq_df = _ksq_df[['T1']]
-    st.markdown("**관리한계 이탈 진단 (T1)**" if it.get('distribution_mode') == 'nonnormal' else "**KSQ 규칙 진단 매트릭스 (T1~T8)**")
-    try:
-        _ksq_style = lambda v: STATUS_CELL_STYLES['bad' if int(v) > 0 else 'good']
-        if hasattr(_ksq_df.style, 'map'):
-            _ksq_styled = _ksq_df.style.map(_ksq_style)
-        else:
-            _ksq_styled = _ksq_df.style.applymap(_ksq_style)
-        st.dataframe(_ksq_styled, use_container_width=True)
-    except Exception:
-        st.dataframe(_ksq_df, use_container_width=True)
-
-    if _ksq_total == 0:
-        _ksq_cls = "good"
-        _ksq_txt = "KSQ 규칙 위반 없음"
+    if extended:
+        _render_extended_diagnostics(it)
     else:
-        _ksq_cls = "bad"
-        _ksq_txt = f"KSQ 규칙 위반 {int(_ksq_total)}건 감지"
-    st.markdown(
-        f"<div class='stats-note {_ksq_cls}'><b>규칙 판정:</b> {_ksq_txt}</div>",
-        unsafe_allow_html=True,
-    )
+        _ksq_c = it.get('ksq_counts', {})
+        _ksq_total = sum(int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9))
+        _ksq_df = pd.DataFrame([{f'T{j}': int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9)}], index=["위반 건수"])
+        if it.get('distribution_mode') == 'nonnormal':
+            st.caption(it.get('pearson_rules_note', ''))
+            _ksq_df = _ksq_df[['T1']]
+        st.markdown("**관리한계 이탈 진단 (T1)**" if it.get('distribution_mode') == 'nonnormal' else "**KSQ 규칙 진단 매트릭스 (T1~T8)**")
+        try:
+            _ksq_style = lambda v: STATUS_CELL_STYLES['bad' if int(v) > 0 else 'good']
+            if hasattr(_ksq_df.style, 'map'):
+                _ksq_styled = _ksq_df.style.map(_ksq_style)
+            else:
+                _ksq_styled = _ksq_df.style.applymap(_ksq_style)
+            st.dataframe(_ksq_styled, use_container_width=True)
+        except Exception:
+            st.dataframe(_ksq_df, use_container_width=True)
+
+        if _ksq_total == 0:
+            _ksq_cls = "good"
+            _ksq_txt = "KSQ 규칙 위반 없음"
+        else:
+            _ksq_cls = "bad"
+            _ksq_txt = f"KSQ 규칙 위반 {int(_ksq_total)}건 감지"
+        st.markdown(
+            f"<div class='stats-note {_ksq_cls}'><b>규칙 판정:</b> {_ksq_txt}</div>",
+            unsafe_allow_html=True,
+        )
 
     if "만족" in _norm_msg:
         _norm_cls = "good"
@@ -3876,7 +3938,7 @@ if _extended_result:
         item, _ = _select_detail_item(results)
         render_extended(item, results, palette)
         st.stop()
-    st.caption("공정능력과 관리 상태 참고값은 공정능력 분석 기준으로 표시합니다. 확장 X̄와 S의 이탈 건수는 확장 관리도에서 확인하세요.")
+    st.caption("공정능력 지수는 공정능력 분석 기준으로 표시합니다. 확장 X̄와 S의 한계와 판정은 확장 관리도와 상세 통계에서 확인하세요.")
     if beginner:
         quick_results(results, render_chart=None)
         st.stop()
@@ -3919,7 +3981,17 @@ m3.metric(_threshold_text("Cpk < 1.00 (불량)"), f"{n_cpk_bad}개" if results[0
           help=_threshold_text("공정능력 지수(Cpk)가 1.00 미만인 항목 수. 규격 이탈이 발생할 수 있어 즉시 조치가 필요합니다."))
 m4.metric("규격 이탈 (누적)", f"{n_spec_vio}건",
           help="고객·도면 규격(USL/LSL)을 벗어난 데이터의 총 누적 건수입니다.")
-m5.metric(ctrl_metric_label, f"{n_ctrl_vio}건", help=ctrl_metric_help)
+if _extended_result:
+    extended_monitors = [monitor_signals(it["extended_shewhart"]) for it in results if it.get("extended_shewhart")]
+    if any(not monitor.empty for monitor in extended_monitors):
+        n_extended = sum(int(monitor[["확장 X̄", "S"]].sum().sum()) for monitor in extended_monitors)
+        extended_total = f"{n_extended:,}건"
+    else:
+        extended_total = "감시 데이터 없음" if extended_monitors else "미계산"
+    m5.metric("확장 X̄·S 이탈 (감시구간)", extended_total,
+              help="확장 관리도 설정을 완료한 변수의 감시구간에서 확장 X̄와 S의 한계 이탈을 각각 집계해 더한 값입니다.")
+else:
+    m5.metric(ctrl_metric_label, f"{n_ctrl_vio}건", help=ctrl_metric_help)
 _render_process_info_summary(st.session_state.get('analysis_meta', {}))
 st.markdown("---")
 
@@ -3936,7 +4008,7 @@ if st.session_state.get('beginner_mode'):
         "종합 판정은 규격이탈·공정 안정성·분석 조건을 함께 확인하세요.")
     )
 
-if control_phase_global == 'phase2':
+if control_phase_global == 'phase2' and not _extended_result:
     st.info(
         "📌 **관리용(Phase 2) 모드** — 초기 기준구간으로 관리한계를 고정했고, "
         "상단 관리이탈 집계와 상세 경고는 감시구간 기준으로 표시됩니다."

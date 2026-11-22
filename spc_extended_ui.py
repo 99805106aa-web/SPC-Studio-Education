@@ -16,7 +16,7 @@ from spc_export import fig_to_bytes
 from spc_fast import cached_frame
 from spc_charts import (DEFAULT_PALETTE, EXTENDED_BASELINE_OPACITY, EXTENDED_PANEL_TITLES, PALETTES,
                         build_extended_figure, control_chart_layout, control_chart_limits,
-                        extended_chart_phases, extended_chart_window)
+                        extended_chart_phases, extended_chart_window, extended_transition_labels)
 
 
 def _source_frame():
@@ -76,9 +76,11 @@ def _interactive(result, table, palette=DEFAULT_PALETTE, *, compare=False):
                         subplot_titles=[EXTENDED_PANEL_TITLES[name] for name, _ in panels])
     left, right = extended_chart_window(table)
     _, _, boundary = extended_chart_phases(result["table"])
+    transition = extended_transition_labels(table, boundary)
     shaded_end = right if boundary is None else min(right, boundary)
     control_chart_layout(fig, colors, "<b>확장 슈하르트 관리도</b>",
-                         height=800 if compare else 640, top=106, right=128)
+                         height=(800 if compare else 640) + (34 if transition else 0),
+                         top=106, right=128, bottom=94 if transition else 60)
     ink = fig.layout.font.color
     for annotation in fig.layout.annotations:
         annotation.update(x=0, xanchor="left", font=dict(size=15, color=ink))
@@ -113,7 +115,11 @@ def _interactive(result, table, palette=DEFAULT_PALETTE, *, compare=False):
         control_chart_limits(fig, colors, table[value], limits, row=row,
                              axis_range=mean_axis_limits(result, table) if value == "평균" else None)
     fig.update_xaxes(range=[left, right], showspikes=False)
-    fig.update_xaxes(title_text="원본 부분군", row=last_row, col=1)
+    fig.update_xaxes(title=dict(text="원본 부분군", standoff=40 if transition else 12), row=last_row, col=1)
+    for number, text, align in transition:
+        fig.add_annotation(x=number, y=0, yshift=-30, xref=f"x{last_row}", yref=f"y{last_row} domain",
+                           text=f"<b>{text}</b>", showarrow=False, xanchor=align, yanchor="top",
+                           font=dict(size=12, color=ink))
     if len(table) <= 20:
         fig.update_xaxes(tickvals=table["부분군"].tolist(), row=last_row, col=1)
     return fig

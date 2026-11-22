@@ -645,6 +645,16 @@ def extended_chart_phases(table):
     return reference, monitoring, (last + first) / 2
 
 
+def extended_transition_labels(table, boundary):
+    """Label the subgroup on either side when the transition is in the visible window."""
+    left, right = extended_chart_window(table)
+    if boundary is None or not left < boundary < right:
+        return ()
+    ids = table["부분군"]
+    last, first = int(ids[ids < boundary].iloc[-1]), int(ids[ids > boundary].iloc[0])
+    return ((last, f"{last:,} · 기준 끝", "right"), (first, f"{first:,} · 감시 시작", "left"))
+
+
 EXTENDED_BASELINE_OPACITY = .10
 
 
@@ -656,10 +666,11 @@ def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compar
     ink = "#E2E8F0" if palette == "dark" else "#192C43"
     panels = display_panels(compare)
     fig, axes = plt.subplots(len(panels), 1, figsize=(12, 8.2 if compare else 6.0), sharex=True, facecolor=colors["ax_bg"])
-    fig.subplots_adjust(left=.105, right=.88, top=.82, bottom=.10, hspace=.53)
     x = table["부분군"]
     left, right = extended_chart_window(table)
     reference, monitoring, boundary = extended_chart_phases(result["table"])
+    transition = extended_transition_labels(table, boundary)
+    fig.subplots_adjust(left=.105, right=.88, top=.82, bottom=.16 if transition else .10, hspace=.53)
     shaded_end = right if boundary is None else min(right, boundary)
     fig.text(.105, .913, f"{reference}    |    {monitoring}",
              weight="bold", fontsize=10, color=ink)
@@ -711,7 +722,12 @@ def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compar
         axes[-1].set_xticks(x)
     else:
         axes[-1].xaxis.set_major_locator(MaxNLocator(nbins=12, integer=True))
-    axes[-1].set_xlabel("원본 부분군")
+    axis = axes[-1]
+    for number, text, align in transition:
+        axis.annotate(text, xy=(number, 0), xycoords=axis.get_xaxis_transform(),
+                      xytext=(0, -20), textcoords="offset points", ha=align, va="top",
+                      fontsize=9, weight="bold", color=ink)
+    axis.set_xlabel("원본 부분군", labelpad=24 if transition else 5)
     return fig
 
 
