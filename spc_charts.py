@@ -632,17 +632,21 @@ def extended_chart_window(table):
     return float(x.iloc[0]) - .5, float(x.iloc[-1]) + .5
 
 
-def extended_chart_phases(table):
-    """Describe the full analysis and locate the split between original subgroup IDs."""
+def extended_chart_phases(table, requested=None):
+    """Keep the configured cutoff in original subgroup coordinates."""
     baseline = table.loc[table["구간"] == "기준", "부분군"]
     monitor = table.loc[table["구간"] == "감시", "부분군"]
     last = int(baseline.iloc[-1])
-    reference = f"초기 기준구간 · {len(baseline):,}개 (부분군 {last:,}까지)"
+    cutoff = int(requested) if requested is not None else last
+    reference = f"초기 기준구간 · 원본 1~{cutoff:,} (유효 {len(baseline):,}개)"
+    if last != cutoff:
+        reference += f" · 마지막 유효 {last:,}번"
+    boundary = cutoff + .5
     if monitor.empty:
-        return reference, "감시구간 · 데이터 없음", None
+        return reference, "감시구간 · 데이터 없음", boundary
     first = int(monitor.iloc[0])
-    monitoring = f"감시구간 · {len(monitor):,}개 (부분군 {first:,}부터)"
-    return reference, monitoring, (last + first) / 2
+    monitoring = f"감시구간 · 유효 {len(monitor):,}개 ({first:,}번부터)"
+    return reference, monitoring, boundary
 
 
 def extended_transition_labels(table, boundary):
@@ -652,7 +656,7 @@ def extended_transition_labels(table, boundary):
         return ()
     ids = table["부분군"]
     last, first = int(ids[ids < boundary].iloc[-1]), int(ids[ids > boundary].iloc[0])
-    return ((last, f"{last:,} · 기준 끝", "right"), (first, f"{first:,} · 감시 시작", "left"))
+    return ((last, f"{last:,} · 유효 기준 끝", "right"), (first, f"{first:,} · 유효 감시 시작", "left"))
 
 
 EXTENDED_BASELINE_OPACITY = .10
@@ -668,7 +672,7 @@ def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compar
     fig, axes = plt.subplots(len(panels), 1, figsize=(12, 8.2 if compare else 6.0), sharex=True, facecolor=colors["ax_bg"])
     x = table["부분군"]
     left, right = extended_chart_window(table)
-    reference, monitoring, boundary = extended_chart_phases(result["table"])
+    reference, monitoring, boundary = extended_chart_phases(result["table"], result.get("baseline_requested_count"))
     transition = extended_transition_labels(table, boundary)
     fig.subplots_adjust(left=.105, right=.88, top=.82, bottom=.16 if transition else .10, hspace=.53)
     shaded_end = right if boundary is None else min(right, boundary)

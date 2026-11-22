@@ -75,7 +75,7 @@ def _interactive(result, table, palette=DEFAULT_PALETTE, *, compare=False):
                         vertical_spacing=.12 if compare else .15,
                         subplot_titles=[EXTENDED_PANEL_TITLES[name] for name, _ in panels])
     left, right = extended_chart_window(table)
-    _, _, boundary = extended_chart_phases(result["table"])
+    _, _, boundary = extended_chart_phases(result["table"], result.get("baseline_requested_count"))
     transition = extended_transition_labels(table, boundary)
     shaded_end = right if boundary is None else min(right, boundary)
     control_chart_layout(fig, colors, "<b>확장 슈하르트 관리도</b>",
@@ -160,9 +160,9 @@ def render_extended(item, items, palette):
         if result is None:
             return
         compare = st.checkbox("일반 X̄ 비교 표시", key=prefix + "_comparison")
-        reference, monitoring, _ = extended_chart_phases(result["table"])
+        reference, monitoring, _ = extended_chart_phases(result["table"], result.get("baseline_requested_count"))
         st.markdown(f"**{reference}**　|　**{monitoring}**")
-        st.caption("음영은 초기 기준구간이며 세로 점선 뒤부터 감시구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다."
+        st.caption("음영은 초기 기준구간이며 세로 점선은 설정한 기준 경계입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다."
                    if not monitor.empty else "음영은 초기 기준구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다.")
         table = result["table"].iloc[window]
         st.plotly_chart(_interactive(result, table, palette, compare=compare), key=prefix + "_chart", theme=None,

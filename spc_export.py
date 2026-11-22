@@ -14,7 +14,7 @@ import base64
 import numpy as np
 import pandas as pd
 from spc_normality import diagnostics_html, shape_summary_display
-from spc_extended import EXTENDED_MODE, GUIDE as EXTENDED_GUIDE, TITLE as EXTENDED_TITLE, calculation_note, monitor_signals
+from spc_extended import EXTENDED_MODE, GUIDE as EXTENDED_GUIDE, TITLE as EXTENDED_TITLE, calculation_note, monitor_counts, monitor_signals
 from typing import Any, Dict, List, Optional, Tuple
 
 PROCESS_INFO_LABELS = ["공정명", "라인/호기", "설비명", "제품명", "품번", "Lot/Batch", "작업자/교대", "비고"]
@@ -158,20 +158,12 @@ def _extended_report_monitors(results):
             for it in results if it.get('chart_usage_mode') == EXTENDED_MODE}
 
 
-def _extended_monitor_counts(monitor):
-    if monitor is None or monitor.empty:
-        return None, None, None, None
-    signals = monitor[['확장 X̄', 'S']]
-    x_count, s_count = map(int, signals.sum())
-    return x_count, s_count, x_count + s_count, int(signals.iloc[-1].any())
-
-
 def _apply_extended_monitor_summary(summary, monitors):
     if not monitors or summary.empty or '변수' not in summary:
         return
     names = summary['변수'].astype(str)
     mask = names.isin(monitors)
-    counts = {name: _extended_monitor_counts(monitor) for name, monitor in monitors.items()}
+    counts = {name: monitor_counts(monitor) for name, monitor in monitors.items()}
     for i, column in enumerate(('X관리이탈', 'R관리이탈', '관리이탈', '최근관리이탈')):
         if column in summary:
             summary[column] = summary[column].astype(object)
@@ -234,7 +226,7 @@ def _report_variable_detail(it: Dict[str, Any], monitor=None) -> Dict[str, Any]:
     ctrl_v = int(it.get("x_ctrl_violation_count", 0) + it.get("r_ctrl_violation_count", 0))
     is_extended = it.get('chart_usage_mode') == EXTENDED_MODE
     if is_extended:
-        _, _, ctrl_v, _ = _extended_monitor_counts(monitor)
+        _, _, ctrl_v, _ = monitor_counts(monitor)
     assessment = assess_process(it)
     risk_cls = {"high": "bad", "medium": "warn", "unknown": "warn", "low": "good"}[assessment['level']]
     if risk_cls == 'good' and it.get('capability_status') != '적용 가능':
@@ -595,7 +587,7 @@ def export_summary_excel(
             limits = ext['limits'] if ext else {}
             x_lcl, x_cl, x_ucl = limits.get('확장 X̄', (None, None, None))
             r_lcl, r_cl, r_ucl = limits.get('S', (None, None, None))
-            x_count, r_count, _, _ = _extended_monitor_counts(extended_monitors[name])
+            x_count, r_count, _, _ = monitor_counts(extended_monitors[name])
             kind = 'S (확장 X̄와 함께, 감시구간 집계)'
         row = [
             str(it.get("column", "")),

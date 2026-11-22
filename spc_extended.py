@@ -29,6 +29,15 @@ def monitor_signals(result):
     return result["table"].iloc[result["count"]:][list(columns)].ne("이내").rename(columns=columns)
 
 
+def monitor_counts(monitor):
+    """Summarize extended Xbar and S signals, excluding optional comparison charts."""
+    if monitor is None or monitor.empty:
+        return None, None, None, None
+    signals = monitor[["확장 X̄", "S"]]
+    x_count, s_count = map(int, signals.sum())
+    return x_count, s_count, x_count + s_count, int(signals.iloc[-1].any())
+
+
 def unsupported_reason(item):
     if not 2 <= item["n"] <= 25:
         return "부분군 크기가 2~25인 계량형 자료에서 계산할 수 있습니다."
@@ -129,7 +138,8 @@ def calculate(item, config, source=None):
                                          ["하한 미달", "상한 초과"], default="이내")
     return dict(limits=limits, table=table, sigma=sigma, margin=margin, lower=lower, upper=upper,
                 method=METHODS[method], confidence=confidence, count=count, counts=counts,
-                reference=item.get("limit_reference_label", ""), n=n)
+                reference=item.get("limit_reference_label", ""), n=n,
+                baseline_requested_count=item.get("baseline_requested_count"))
 
 
 def calculation_note(result):

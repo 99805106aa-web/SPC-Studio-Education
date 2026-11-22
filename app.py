@@ -1024,7 +1024,7 @@ from spc_mode_ui import (preserve_settings, beginner_inputs, beginner_conditions
 from spc_metric_ui import process_metric_cards_html, STATUS_CELL_STYLES
 from spc_distribution_ui import render_distribution_panel
 from spc_extended_ui import render_extended, with_extended_results
-from spc_extended import EXTENDED_MODE, TITLE as EXTENDED_TITLE, display_panels, monitor_signals, unsupported_reason
+from spc_extended import EXTENDED_MODE, TITLE as EXTENDED_TITLE, display_panels, monitor_counts, monitor_signals, unsupported_reason
 from spc_chart_guide import chart_selection_error, chart_selection_label, render_chart_guide, render_studio_header
 from spc_education import render_ocap_exercise, render_samples
 
@@ -4299,6 +4299,18 @@ with tab_summ:
             st.success(f"**{_tl_hint}** 항목이 필터링되었습니다. 아래 표에서 확인하세요.")
 
         if summary_df is not None and not summary_df.empty:
+            control_totals = {}
+            extended_counts = {}
+            for item in results:
+                name = str(item['column'])
+                if item.get('chart_usage_mode') == EXTENDED_MODE:
+                    ext = item.get('extended_shewhart')
+                    extended_counts[name] = monitor_counts(monitor_signals(ext) if ext is not None else None)
+                    control_totals[name] = extended_counts[name][2]
+                else:
+                    control_totals[name] = _get_ctrl_total(item)
+            if extended_counts:
+                st.caption("관리 이탈은 확장 X̄와 S의 감시구간 이탈 합계입니다. 미계산 또는 감시 데이터가 없는 항목은 빈칸으로 표시합니다.")
             # 필터 버튼
             fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
             _flt = st.session_state.get('summary_filter', 'all')
@@ -4324,7 +4336,7 @@ with tab_summ:
             elif _flt == 'spec':
                 show_results = [it for it in results if it.get('spec_violation_count', 0) > 0]
             elif _flt == 'ctrl':
-                show_results = [it for it in results if _get_ctrl_total(it) > 0]
+                show_results = [it for it in results if (control_totals.get(str(it['column'])) or 0) > 0]
             if search_q.strip():
                 show_results = [it for it in show_results if search_q.strip().lower() in str(it['column']).lower()]
 
@@ -4345,7 +4357,13 @@ with tab_summ:
             for _column, _key in (('평가 상태', 'state'), ('폭 지수', 'width'), ('치우침 반영 지수', 'shifted')):
                 _df_show[_column] = [pair[_key] for pair in _pairs]
             _df_show['판정'] = [assess_process(it)['text'] if it is not None else '계산 불가' for it in _row_items]
-            _df_show['관리이탈'] = [_get_ctrl_total(it) if it is not None else None for it in _row_items]
+            names = _df_show['변수'].astype(str)
+            _df_show['관리이탈'] = pd.array(names.map(control_totals), dtype='Int64')
+            for index, column in ((0, 'X관리이탈'), (1, 'R관리이탈'), (3, '최근관리이탈')):
+                if extended_counts and column in _df_show:
+                    mask = names.isin(extended_counts)
+                    _df_show[column] = _df_show[column].astype(object)
+                    _df_show.loc[mask, column] = [extended_counts[name][index] for name in names[mask]]
             for _metric in ('Cw', 'Cwk'):
                 if _metric not in _df_show.columns:
                     _df_show[_metric] = [fmt_value(it.get(_metric.lower(), np.nan)) if it is not None else '—' for it in _row_items]
@@ -4360,6 +4378,11 @@ with tab_summ:
                 'Cwk': st.column_config.Column('Cwk', help='군내산포 고려. n=1은 MR 기반 참고값입니다.'),
                 'Cw': st.column_config.Column('Cw', help='군내산포 고려. n=1은 MR 기반 참고값입니다.'),
                 '관리이탈': st.column_config.Column('관리이탈', help='X·산포 관리도 이탈 건수의 합계. 관리용은 감시 구간 기준입니다.'),
+                **({
+                    '관리이탈': st.column_config.Column('확장 X̄·S 이탈', help='감시구간의 확장 X̄와 S 이탈 건수의 합계입니다.'),
+                    'X관리이탈': st.column_config.Column('확장 X̄ 이탈'),
+                    'R관리이탈': st.column_config.Column('S 이탈'),
+                } if extended_counts else {}),
             }
             # Reset selection when the visible row set/order or view changes.
             _summary_table_key = f"summary_table_{_summary_view}_{hash(tuple(_df_show['변수'].astype(str)))}"
