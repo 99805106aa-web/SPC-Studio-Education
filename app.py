@@ -1030,7 +1030,7 @@ from spc_charts import (
 )
 from spc_fast import BoundedCache, cached_analysis, cached_frame, analysis_key, ui_analysis
 from spc_mode_ui import (preserve_settings, beginner_inputs, beginner_conditions, measurement_column_picker,
-                         quick_results, paged_window, show_scrollable_interactive_chart)
+                         quick_results, paged_window, show_scrollable_interactive_chart, subgroup_size_input)
 from spc_metric_ui import process_metric_cards_html, STATUS_CELL_STYLES
 from spc_distribution_ui import render_distribution_panel
 from spc_acceptance_ui import read_acceptance_measurements, render_acceptance_results
@@ -3228,12 +3228,10 @@ with st.sidebar:
                 st.session_state['measurement_date_column'] = ""
 
             if data_layout_mode == 'long':
-                n_val = st.number_input(
-                    "시료 크기 (n)",
-                    min_value=1, max_value=25, value=st.session_state['n'],
+                subgroup_size_input(
+                    "시료 크기 (n)", 'advanced_subgroup_size',
                     help="n=1 → I-MR (X-MR), n=2~9 → Xbar-R, n≥10 → Xbar-S(자동 전환)",
                 )
-                st.session_state['n'] = int(n_val)
 
                 st.caption("불완전 부분군은 관리도·능력 계산에서 제외합니다. 원본 규격이탈 집계에는 포함됩니다.")
                 st.session_state['include_incomplete'] = False

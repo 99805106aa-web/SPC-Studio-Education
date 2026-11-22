@@ -9,6 +9,7 @@ from spc_extended import EXTENDED_MODE
 from spc_fast import BoundedCache, chart_window, signal_indices
 from spc_charts import build_control_chart, build_interactive_control_chart
 from spc_export import fig_to_bytes
+from spc_file_ui import invalidate_analysis
 import matplotlib.pyplot as plt
 
 
@@ -90,6 +91,25 @@ def measurement_column_picker(options):
     st.multiselect("분석할 측정 항목", options, key=key, on_change=save_selection)
 
 
+def subgroup_size_input(label, key, *, help):
+    state = st.session_state
+    current = int(state['n'])
+    draft_key = f'{key}_draft'
+    if state.get(draft_key) != current:
+        state[draft_key] = current
+
+    def apply_size():
+        chosen = int(state[draft_key])
+        if chosen != state['n']:
+            invalidate_analysis(state)
+            state['n'] = chosen
+
+    with st.form(key, border=False):
+        st.number_input(label, min_value=1, max_value=25, key=draft_key, help=help)
+        st.form_submit_button('시료 크기 적용', on_click=apply_size, width='stretch')
+    st.caption(f'적용된 시료 크기 {current}개 · 값을 조정한 뒤 적용을 누르세요.')
+
+
 def beginner_inputs(frame):
     st.markdown('### ② 측정 방식 확인')
     layouts = ['long', 'wide_subgroup_cols']
@@ -111,8 +131,8 @@ def beginner_inputs(frame):
     numeric = [str(c) for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c]) and str(c) != selected]
     if layout == 'long':
         measurement_column_picker(numeric)
-        st.session_state['n'] = int(st.number_input('한 번에 함께 측정한 개수', 1, 25,
-            value=int(st.session_state['n']), help='한 번에 한 값이면 1, 같은 조건에서 5개씩 측정했다면 5를 선택하세요.'))
+        subgroup_size_input('한 번에 함께 측정한 개수', 'beginner_subgroup_size',
+                            help='한 번에 한 값이면 1, 같은 조건에서 5개씩 측정했다면 5를 선택하세요.')
         st.caption('입력한 개수씩 위에서부터 묶습니다. 날짜 순서와 묶음을 미리보기로 확인하세요.')
     else:
         previous = st.session_state.get('subgroup_columns', [])

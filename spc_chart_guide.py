@@ -408,12 +408,12 @@ def _render_tutorial(attribute, selected, ready, frame):
             initial = current_n if locked else state.get('_guide_tutorial_group_size', current_n if 2 <= current_n <= 25 else 5)
             if locked and state.get('_guide_tutorial_group_input') != initial:
                 state['_guide_tutorial_group_input'] = initial
-            st.number_input("한 부분군에 몇 개가 들어가나요?", min_value=2, max_value=25, value=initial,
-                            disabled=locked, key='_guide_tutorial_group_input')
-            if locked:
-                st.caption("사이드바에서 선택한 부분군 측정 열 수를 적용합니다.")
-            st.button("다음", key='guide_tutorial_size_next', type='primary', on_click=_set_tutorial_group_size,
-                      args=(path_key,))
+            with st.form('guide_tutorial_group_size_form', border=False):
+                st.number_input("한 부분군에 몇 개가 들어가나요?", min_value=2, max_value=25, value=initial,
+                                disabled=locked, key='_guide_tutorial_group_input')
+                if locked:
+                    st.caption("사이드바에서 선택한 부분군 측정 열 수를 적용합니다.")
+                st.form_submit_button("다음", type='primary', on_click=_set_tutorial_group_size, args=(path_key,))
         else:
             question, hint, choices = TUTORIAL_QUESTIONS[step]
             st.caption(f"{len(path)}단계")
