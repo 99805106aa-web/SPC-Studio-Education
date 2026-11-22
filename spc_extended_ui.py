@@ -14,9 +14,9 @@ from spc_extended import (EXTENDED_MODE, GUIDE, METHODS, STAGES, TITLE, calculat
                           subgroup_ids, tool_states, unsupported_reason)
 from spc_export import fig_to_bytes
 from spc_fast import cached_frame
-from spc_charts import (DEFAULT_PALETTE, EXTENDED_PANEL_TITLES, PALETTES,
+from spc_charts import (DEFAULT_PALETTE, EXTENDED_BASELINE_OPACITY, EXTENDED_PANEL_TITLES, PALETTES,
                         build_extended_figure, control_chart_layout, control_chart_limits,
-                        control_chart_phase, extended_chart_window)
+                        extended_chart_phases, extended_chart_window)
 
 
 def _source_frame():
@@ -74,7 +74,9 @@ def _interactive(result, table, palette=DEFAULT_PALETTE, *, compare=False):
     fig = make_subplots(rows=last_row, cols=1, shared_xaxes=True,
                         vertical_spacing=.12 if compare else .15,
                         subplot_titles=[EXTENDED_PANEL_TITLES[name] for name, _ in panels])
-    left, right, start = extended_chart_window(table)
+    left, right = extended_chart_window(table)
+    _, _, boundary = extended_chart_phases(result["table"])
+    shaded_end = right if boundary is None else min(right, boundary)
     control_chart_layout(fig, colors, "<b>확장 슈하르트 관리도</b>",
                          height=800 if compare else 640, top=106, right=128)
     ink = fig.layout.font.color
@@ -96,14 +98,21 @@ def _interactive(result, table, palette=DEFAULT_PALETTE, *, compare=False):
                                  marker=dict(color=colors["danger"], size=12,
                                              line=dict(color=colors["ax_bg"], width=1.2)),
                                  customdata=custom[bad], hovertemplate=hover), row=row, col=1)
-        control_chart_phase(fig, colors, left, right, start, row=row, labels=row == 1)
+        if left < shaded_end:
+            fig.add_vrect(x0=left, x1=shaded_end, fillcolor=colors["primary"], opacity=EXTENDED_BASELINE_OPACITY,
+                          line_width=0, layer="below", row=row, col=1)
+            suffix = "" if row == 1 else str(row)
+            fig.add_shape(type="line", x0=left, x1=shaded_end, y0=.993, y1=.993,
+                          xref=f"x{suffix}", yref=f"y{suffix} domain", line=dict(color=colors["primary"], width=3))
+        if boundary is not None and left < boundary < right:
+            fig.add_vline(x=boundary, line_dash="dash", line_width=2.5, line_color=colors["primary"], row=row, col=1)
         if name == "확장 X̄":
             fig.add_hrect(y0=result["lower"], y1=result["upper"], fillcolor=colors["success"],
                           opacity=.12, line_width=0, layer="below", row=row, col=1)
         limits = [("UCL", upper), ("CL", center), ("LCL", lower)]
         control_chart_limits(fig, colors, table[value], limits, row=row,
                              axis_range=mean_axis_limits(result, table) if value == "평균" else None)
-    fig.update_xaxes(range=[left, right])
+    fig.update_xaxes(range=[left, right], showspikes=False)
     fig.update_xaxes(title_text="원본 부분군", row=last_row, col=1)
     if len(table) <= 20:
         fig.update_xaxes(tickvals=table["부분군"].tolist(), row=last_row, col=1)
@@ -145,7 +154,10 @@ def render_extended(item, items, palette):
         if result is None:
             return
         compare = st.checkbox("일반 X̄ 비교 표시", key=prefix + "_comparison")
-        st.caption("옅은 세로 음영은 기준구간 · 녹색 띠는 확장 X̄의 예상 평균 범위 · 빨간 점은 관리한계 이탈")
+        reference, monitoring, _ = extended_chart_phases(result["table"])
+        st.markdown(f"**{reference}**　|　**{monitoring}**")
+        st.caption("파란 음영은 초기 기준구간이며 세로 점선 뒤부터 감시구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다."
+                   if not monitor.empty else "파란 음영은 초기 기준구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다.")
         table = result["table"].iloc[window]
         st.plotly_chart(_interactive(result, table, palette, compare=compare), key=prefix + "_chart", theme=None,
                         config={"scrollZoom": False, "displaylogo": False})

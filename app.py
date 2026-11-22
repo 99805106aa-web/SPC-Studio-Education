@@ -2808,17 +2808,18 @@ def _open_intermediate():
 
 
 def _render_baseline_input():
+    extended = st.session_state['chart_usage_mode'] == EXTENDED_MODE
     baseline_unit = "샘플" if st.session_state['n'] == 1 else "부분군"
     baseline_subgroups = st.number_input(
-        f"기준구간 수 (초기 {baseline_unit})",
+        "초기 기준 부분군 수" if extended else f"기준구간 수 (초기 {baseline_unit})",
         min_value=3,
         max_value=200,
         value=int(st.session_state.get('baseline_subgroups', 25)),
         help="초기 기준구간으로 관리한계를 계산하고 이후 데이터는 같은 한계로 감시합니다. 실무에서는 20~25개 이상 권장입니다.",
     )
     st.session_state['baseline_subgroups'] = int(baseline_subgroups)
-    if st.session_state['chart_usage_mode'] == EXTENDED_MODE:
-        st.caption("기준구간으로 확장 X̄와 S의 관리한계를 계산합니다. 자동 산정에는 유효 기준 부분군이 6개 이상 필요합니다.")
+    if extended:
+        st.caption("입력한 개수만큼 초기 부분군으로 관리한계를 계산하고, 다음 부분군부터 감시합니다. 자동 산정에는 유효 기준 부분군이 6개 이상 필요합니다.")
     else:
         st.caption("관리용은 안정하다고 판단되는 초기 구간으로 한계선을 고정하고, 이후 구간만 감시용으로 판정합니다.")
 

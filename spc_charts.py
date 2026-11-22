@@ -629,10 +629,23 @@ EXTENDED_PANEL_TITLES = {
 
 def extended_chart_window(table):
     x = table["부분군"]
-    left, right = float(x.iloc[0]) - .5, float(x.iloc[-1]) + .5
-    monitor = x[table["구간"] == "감시"]
-    start = None if monitor.empty else float(monitor.iloc[0]) - .5
-    return left, right, start
+    return float(x.iloc[0]) - .5, float(x.iloc[-1]) + .5
+
+
+def extended_chart_phases(table):
+    """Describe the full analysis and locate the split between original subgroup IDs."""
+    baseline = table.loc[table["구간"] == "기준", "부분군"]
+    monitor = table.loc[table["구간"] == "감시", "부분군"]
+    last = int(baseline.iloc[-1])
+    reference = f"초기 기준구간 · {len(baseline):,}개 (부분군 {last:,}까지)"
+    if monitor.empty:
+        return reference, "감시구간 · 데이터 없음", None
+    first = int(monitor.iloc[0])
+    monitoring = f"감시구간 · {len(monitor):,}개 (부분군 {first:,}부터)"
+    return reference, monitoring, (last + first) / 2
+
+
+EXTENDED_BASELINE_OPACITY = .10
 
 
 def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compare=False):
@@ -642,32 +655,37 @@ def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compar
     table = result["table"] if table is None else table
     ink = "#E2E8F0" if palette == "dark" else "#192C43"
     panels = display_panels(compare)
-    fig, axes = plt.subplots(len(panels), 1, figsize=(12, 7.9 if compare else 5.7), sharex=True, facecolor=colors["ax_bg"])
-    fig.subplots_adjust(left=.105, right=.88, top=.84, bottom=.10, hspace=.53)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(12, 8.2 if compare else 6.0), sharex=True, facecolor=colors["ax_bg"])
+    fig.subplots_adjust(left=.105, right=.88, top=.82, bottom=.10, hspace=.53)
     x = table["부분군"]
-    left, right, start = extended_chart_window(table)
+    left, right = extended_chart_window(table)
+    reference, monitoring, boundary = extended_chart_phases(result["table"])
+    shaded_end = right if boundary is None else min(right, boundary)
+    fig.text(.105, .913, f"{reference}    |    {monitoring}",
+             weight="bold", fontsize=10, color=ink)
     legend = [
         Line2D([], [], color=colors["muted"], lw=1.2, ls=(0, (1, 2)), label="중심선"),
         Line2D([], [], color=colors["danger"], lw=1.4, ls=(0, (5, 3)), label="관리한계"),
         Line2D([], [], color=colors["danger"], marker="o", ls="None", markersize=5, label="관리한계 이탈"),
-        Rectangle((0, 0), 1, 1, fc=colors["primary"], ec="none", alpha=.045, label="기준구간"),
+        Rectangle((0, 0), 1, 1, fc=colors["primary"], ec="none",
+                  alpha=EXTENDED_BASELINE_OPACITY, label="초기 기준구간"),
         Rectangle((0, 0), 1, 1, fc=colors["success"], ec="none", alpha=.13, label="예상 평균 범위"),
     ]
     fig.legend(handles=legend, loc="upper left", bbox_to_anchor=(.09, .988), ncol=5,
                frameon=False, fontsize=9)
-    for index, (ax, (name, value)) in enumerate(zip(axes, panels)):
+    for ax, (name, value) in zip(axes, panels):
         title = EXTENDED_PANEL_TITLES[name]
         accent = colors["primary"]
         bad = table[name + " 판정"] != "이내"
         ax.set_axisbelow(True)
         ax.grid(axis="x", visible=False)
         ax.spines[["top", "right"]].set_visible(False)
-        if start is not None and left < start < right:
-            ax.axvspan(left, start, color=colors["accent"], alpha=.045, lw=0, zorder=0)
-            ax.axvline(start, color=colors["muted"], ls=":", lw=1.2, zorder=2)
-            if index == 0:
-                ax.text(.01, .98, "기준구간", transform=ax.transAxes, va="top", fontsize=8, color=colors["muted"])
-                ax.text(.99, .98, "감시구간", transform=ax.transAxes, ha="right", va="top", fontsize=8, color=colors["muted"])
+        if left < shaded_end:
+            ax.axvspan(left, shaded_end, color=colors["primary"], alpha=EXTENDED_BASELINE_OPACITY, lw=0, zorder=0)
+            ax.plot([left, shaded_end], [.993, .993], transform=ax.get_xaxis_transform(),
+                    color=colors["primary"], lw=2, solid_capstyle="butt", zorder=3)
+        if boundary is not None and left < boundary < right:
+            ax.axvline(boundary, color=colors["primary"], ls=(0, (5, 3)), lw=1.8, zorder=3)
         if name == "확장 X̄":
             ax.axhspan(result["lower"], result["upper"], color=colors["success"], alpha=.12, lw=0, zorder=0)
         ax.plot(x, table[value], color=accent, marker="o" if len(x) <= 200 else None, ms=3.2, lw=1.55)
@@ -689,7 +707,10 @@ def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compar
         ax.yaxis.set_major_locator(MaxNLocator(5))
         ax.ticklabel_format(axis="y", useOffset=False, scilimits=(-4, 5))
     axes[-1].set_xlim(left, right)
-    axes[-1].xaxis.set_major_locator(MaxNLocator(nbins=12, integer=True))
+    if len(x) <= 20:
+        axes[-1].set_xticks(x)
+    else:
+        axes[-1].xaxis.set_major_locator(MaxNLocator(nbins=12, integer=True))
     axes[-1].set_xlabel("원본 부분군")
     return fig
 
