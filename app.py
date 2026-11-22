@@ -976,7 +976,17 @@ def _refresh_analysis_modules():
     """Recover stale imports after updating a running Streamlit app."""
     import inspect
     import spc_core
+    import spc_extended
     import spc_fast
+
+    # Streamlit can rerun this entrypoint while keeping its imported modules.
+    if not hasattr(spc_extended, 'monitor_counts'):
+        importlib.invalidate_caches()
+        importlib.reload(spc_extended)
+        for name in ('spc_charts', 'spc_extended_ui', 'spc_export'):
+            module = sys.modules.get(name)
+            if module is not None:
+                importlib.reload(module)
 
     required = {'selected_columns', 'detail_level', 'progress_callback'}
     if not required.issubset(inspect.signature(spc_core.run_full_analysis).parameters):
