@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from plotly.colors import hex_to_rgb
 from plotly.subplots import make_subplots
 
 from spc_extended import (EXTENDED_MODE, GUIDE, METHODS, STAGES, TITLE, calculate,
@@ -15,9 +14,9 @@ from spc_extended import (EXTENDED_MODE, GUIDE, METHODS, STAGES, TITLE, calculat
                           subgroup_ids, tool_states, unsupported_reason)
 from spc_export import fig_to_bytes
 from spc_fast import cached_frame
-from spc_charts import (DEFAULT_PALETTE, EXTENDED_PANEL_STYLES, PALETTES,
-                        build_extended_figure, extended_chart_window,
-                        extended_limits_display)
+from spc_charts import (DEFAULT_PALETTE, EXTENDED_PANEL_TITLES, PALETTES,
+                        build_extended_figure, control_chart_layout, control_chart_limits,
+                        control_chart_phase, extended_chart_window)
 
 
 def _source_frame():
@@ -70,58 +69,44 @@ def with_extended_results(items):
 
 def _interactive(result, table, palette=DEFAULT_PALETTE, *, compare=False):
     colors = PALETTES.get(palette, PALETTES[DEFAULT_PALETTE])
-    ink = "#E2E8F0" if palette == "dark" else "#192C43"
     panels = display_panels(compare)
     last_row = len(panels)
     fig = make_subplots(rows=last_row, cols=1, shared_xaxes=True,
-                        vertical_spacing=.133 if compare else .16)
+                        vertical_spacing=.12 if compare else .15,
+                        subplot_titles=[EXTENDED_PANEL_TITLES[name] for name, _ in panels])
     left, right, start = extended_chart_window(table)
+    control_chart_layout(fig, colors, "<b>확장 슈하르트 관리도</b>",
+                         height=800 if compare else 640, top=106, right=128)
+    ink = fig.layout.font.color
+    for annotation in fig.layout.annotations:
+        annotation.update(x=0, xanchor="left", font=dict(size=15, color=ink))
     for row, (name, value) in enumerate(panels, 1):
-        title, color = EXTENDED_PANEL_STYLES[name]
-        accent = colors[color]
-        limits = result["limits"][name]
-        if start is not None:
-            fig.add_vrect(x0=start, x1=right, fillcolor=colors["primary"], opacity=.065,
-                          line_width=0, layer="below", row=row, col=1, exclude_empty_subplots=False)
-            if start > left:
-                fig.add_vline(x=start, line_width=1.2, line_color=colors["primary"], opacity=.65,
-                              row=row, col=1, exclude_empty_subplots=False)
-        if name == "확장 X̄":
-            fig.add_hrect(y0=result["lower"], y1=result["upper"], fillcolor=accent, opacity=.12,
-                          line_width=0, layer="below", row=row, col=1, exclude_empty_subplots=False)
+        lower, center, upper = result["limits"][name]
         bad = table[name + " 판정"] != "이내"
-        fig.add_trace(go.Scatter(
-            x=table["부분군"], y=table[value], mode="lines+markers", name=name,
-            line={"color": accent, "width": 2},
-            marker={"color": np.where(bad, colors["danger"], accent),
-                    "symbol": np.where(bad, "diamond", "circle"), "size": np.where(bad, 9, 5),
-                    "line": {"color": colors["ax_bg"], "width": .6}},
-            customdata=table[["구간", "공구 상태", name + " 판정"]].to_numpy(),
-            hovertemplate=("부분군 %{x} · %{customdata[0]}<br>" + value + " %{y:.8g}<br>"
-                           "%{customdata[1]} · %{customdata[2]}<extra></extra>")), row=row, col=1)
-        for i, limit in enumerate(limits):
-            fig.add_hline(y=limit, row=row, col=1, line_dash="dot" if i == 1 else "dash",
-                          line_width=1.25, line_color=colors["muted"] if i == 1 else colors["accent"], layer="below")
-        axis = "yaxis" if row == 1 else f"yaxis{row}"
-        top = fig.layout[axis].domain[1]
-        fig.add_annotation(x=0, y=top, xref="paper", yref="paper", xanchor="left",
-                           yanchor="bottom", yshift=23, showarrow=False,
-                           text=f"<b>{title}</b>", font={"size": 15, "color": ink})
-        fig.add_annotation(x=0, y=top, xref="paper", yref="paper", xanchor="left",
-                           yanchor="bottom", yshift=5, showarrow=False,
-                           text=extended_limits_display(limits).replace("    ", " &nbsp;·&nbsp; "),
-                           font={"size": 11, "color": colors["muted"]})
-        if value == "평균":
-            fig.update_yaxes(range=mean_axis_limits(result, table), row=row, col=1)
-    grid = f"rgba{(*hex_to_rgb(colors['grid']), .72)}"
-    fig.update_xaxes(range=[left, right], showgrid=False, linecolor=colors["grid"], showline=True)
-    fig.update_yaxes(gridcolor=grid, zeroline=False, nticks=5, tickformat=".6~g")
+        custom = table[["구간", "공구 상태", name + " 판정"]].to_numpy()
+        hover = ("<b>부분군 %{x} · %{customdata[0]}</b><br>" + value + " %{y:.8g}<br>"
+                 "%{customdata[1]} · %{customdata[2]}<br>"
+                 f"UCL {upper:.6g} / CL {center:.6g} / LCL {lower:.6g}<extra></extra>")
+        fig.add_trace(go.Scatter(x=table["부분군"], y=table[value], mode="lines+markers",
+                                 name="관측값", showlegend=row == 1, legendgroup="values",
+                                 line=dict(color=colors["primary"], width=2.2), marker=dict(size=7),
+                                 customdata=custom, hovertemplate=hover), row=row, col=1)
+        fig.add_trace(go.Scatter(x=table.loc[bad, "부분군"], y=table.loc[bad, value], mode="markers",
+                                 name="관리한계 이탈", showlegend=row == 1, legendgroup="signals",
+                                 marker=dict(color=colors["danger"], size=12,
+                                             line=dict(color=colors["ax_bg"], width=1.2)),
+                                 customdata=custom[bad], hovertemplate=hover), row=row, col=1)
+        control_chart_phase(fig, colors, left, right, start, row=row, labels=row == 1)
+        if name == "확장 X̄":
+            fig.add_hrect(y0=result["lower"], y1=result["upper"], fillcolor=colors["success"],
+                          opacity=.12, line_width=0, layer="below", row=row, col=1)
+        limits = [("UCL", upper), ("CL", center), ("LCL", lower)]
+        control_chart_limits(fig, colors, table[value], limits, row=row,
+                             axis_range=mean_axis_limits(result, table) if value == "평균" else None)
+    fig.update_xaxes(range=[left, right])
     fig.update_xaxes(title_text="원본 부분군", row=last_row, col=1)
     if len(table) <= 20:
         fig.update_xaxes(tickvals=table["부분군"].tolist(), row=last_row, col=1)
-    fig.update_layout(height=700 if compare else 520, margin={"l": 58, "r": 20, "t": 57, "b": 55},
-                      paper_bgcolor=colors["bg"], plot_bgcolor=colors["ax_bg"],
-                      font={"color": ink}, showlegend=False, dragmode="pan")
     return fig
 
 
@@ -160,7 +145,7 @@ def render_extended(item, items, palette):
         if result is None:
             return
         compare = st.checkbox("일반 X̄ 비교 표시", key=prefix + "_comparison")
-        st.caption("옅은 세로 음영은 감시구간 · 확장 X̄의 녹색 띠는 예상 평균 범위 · 마름모는 한계 이탈")
+        st.caption("옅은 세로 음영은 기준구간 · 녹색 띠는 확장 X̄의 예상 평균 범위 · 빨간 점은 관리한계 이탈")
         table = result["table"].iloc[window]
         st.plotly_chart(_interactive(result, table, palette, compare=compare), key=prefix + "_chart", theme=None,
                         config={"scrollZoom": False, "displaylogo": False})

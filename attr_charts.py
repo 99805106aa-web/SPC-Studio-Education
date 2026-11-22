@@ -17,7 +17,6 @@ import matplotlib.gridspec as gridspec
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-from matplotlib.offsetbox import AnchoredText
 from matplotlib.ticker import AutoMinorLocator, PercentFormatter
 from typing import Any, Dict, List, Optional, Tuple
 from attr_presentation import summary_lines
@@ -111,17 +110,6 @@ def _fmt(v, decimals: int = 4) -> str:
     return f"{v:.{decimals}f}"
 
 
-def _side_label(ax, y: float, text: str, color: str, fontsize: float = 8):
-    """축 왼쪽에 UCL/CL/LCL 라벨을 표시한다."""
-    if not np.isfinite(y):
-        return
-    xmin, xmax = ax.get_xlim()
-    x = xmin + 0.01 * (xmax - xmin)
-    ax.text(x, y, text, color=color, ha='left', va='center', fontsize=fontsize,
-            bbox=dict(boxstyle='round,pad=0.2', fc=ax.get_facecolor(), ec=color, lw=0.8, alpha=1),
-            zorder=6, clip_on=True)
-
-
 def _is_variable_limit(chart_type: str) -> bool:
     """p, u 차트는 시료크기에 따라 관리한계가 변동(배열)한다."""
     return chart_type in ('p', 'u')
@@ -148,7 +136,7 @@ def _shade_phase_window(ax, C: dict, baseline_count: int, total_count: int):
     ref = max(0, min(int(baseline_count), int(total_count)))
     if ref <= 0 or ref >= total_count:
         return
-    ax.axvspan(-0.5, ref - 0.5, facecolor=C['accent'], alpha=0.08, zorder=0.1)
+    ax.axvspan(-0.5, ref - 0.5, facecolor=C['accent'], alpha=0.045, zorder=0.1)
     ax.axvline(ref - 0.5, color=C['muted'], linestyle=':', linewidth=1.1, alpha=0.9)
     ax.text(
         0.01, 0.98, "기준구간",
@@ -214,15 +202,16 @@ def build_attribute_control_chart(
     control_phase = str(result.get('control_phase', 'phase1'))
     phase_label = str(result.get('control_phase_label',
                                  '해석용' if control_phase != 'phase2' else '관리용'))
-    baseline_count = int(result.get('baseline_count', m))
+    baseline_count = int(result.get('baseline_display_count', result.get('baseline_count', m)))
 
     # UCL/LCL 배열화
     ucl_arr = _ensure_array(ucl_raw, m)
     lcl_arr = _ensure_array(lcl_raw, m)
-    variable_limits = _is_variable_limit(chart_type)
+    limit_format = '.3%' if chart_type == 'p' else '.6g'
+    format_limit = lambda value: format(value, limit_format)
 
     # ── Figure 생성 ──
-    fig, ax = plt.subplots(figsize=figsize, facecolor=C['bg'])
+    fig, ax = plt.subplots(figsize=figsize, facecolor=C['ax_bg'])
     ax.set_facecolor(C['ax_bg'])
 
     xs = np.arange(m)
@@ -232,29 +221,23 @@ def build_attribute_control_chart(
             linewidth=1.8, label=_CHART_TYPE_KR.get(chart_type, chart_type), zorder=4)
 
     # ── 중심선 ──
-    ax.axhline(cl, linestyle='--', color=C['mean'], linewidth=1.5, label=f'CL={_fmt(cl)}', zorder=3)
+    ax.axhline(cl, linestyle='--', color=C['muted'], linewidth=1.5, label=f'CL {format_limit(cl)}', zorder=3)
 
     # ── 관리한계 (UCL / LCL) ──
-    if variable_limits:
-        # p, u 차트: 시료크기에 따라 변동 → 계단형 선
-        ax.plot(xs, ucl_arr, drawstyle='steps-mid', color=C['danger'],
-                linewidth=1.8, linestyle=(0, (6, 4)), label='UCL (변동)', zorder=3)
-        ax.plot(xs, lcl_arr, drawstyle='steps-mid', color=C['success'],
-                linewidth=1.8, linestyle=(0, (6, 4)), label='LCL (변동)', zorder=3)
-    else:
-        # np, c 차트: 고정 한계 → 수평선
-        ucl_val = float(ucl_arr[0])
-        lcl_val = float(lcl_arr[0])
-        if np.isfinite(ucl_val):
-            ax.axhline(ucl_val, linestyle=(0, (6, 4)), color=C['danger'],
-                       linewidth=1.8, label=f'UCL={_fmt(ucl_val)}', zorder=3)
-        if np.isfinite(lcl_val):
-            ax.axhline(lcl_val, linestyle=(0, (6, 4)), color=C['success'],
-                       linewidth=1.8, label=f'LCL={_fmt(lcl_val)}', zorder=3)
+    for label, limits in (('UCL', ucl_arr), ('LCL', lcl_arr)):
+        if not limits.size:
+            continue
+        if not np.all(limits == limits[-1]):
+            ax.plot(np.r_[-.5, xs, m-.5], np.r_[limits[0], limits, limits[-1]],
+                    drawstyle='steps-mid', color=C['danger'], linewidth=1.4,
+                    linestyle=(0, (6, 4)), label=f'{label} · 부분군별', zorder=3)
+        elif np.isfinite(limits[0]):
+            ax.axhline(limits[0], linestyle=(0, (6, 4)), color=C['danger'],
+                       linewidth=1.4, label=f'{label} {format_limit(limits[0])}', zorder=3)
 
     # ── 위반점 마킹 ──
     mark_map = {
-        'T1': dict(marker='o', s=100, c='#E53935', zorder=10,
+        'T1': dict(marker='o', s=100, c=C['danger'], zorder=10,
                    edgecolors='white', linewidths=1.0, label='T1 (한계 초과)'),
         'T2': dict(marker='s', s=65, c=C['accent'], zorder=8,
                    edgecolors='white', linewidths=0.7, label='T2 (연속 규칙)'),
@@ -280,40 +263,17 @@ def build_attribute_control_chart(
     if control_phase == 'phase2':
         _shade_phase_window(ax, C, baseline_count, m)
 
-    # ── 측면 라벨 ──
-    _side_label(ax, cl, f"CL={_fmt(cl)}", C['mean'], fontsize=9.5)
-    if variable_limits:
-        ucl_avg = float(np.nanmean(ucl_arr))
-        lcl_avg = float(np.nanmean(lcl_arr))
-        _side_label(ax, ucl_avg, f"UCL(평균)={_fmt(ucl_avg)}", C['danger'], fontsize=9.5)
-        _side_label(ax, lcl_avg, f"LCL(평균)={_fmt(lcl_avg)}", C['success'], fontsize=9.5)
-    else:
-        _side_label(ax, float(ucl_arr[0]), f"UCL={_fmt(float(ucl_arr[0]))}", C['danger'], fontsize=9.5)
-        lcl_v = float(lcl_arr[0])
-        if np.isfinite(lcl_v):
-            _side_label(ax, lcl_v, f"LCL={_fmt(lcl_v)}", C['success'], fontsize=9.5)
-
-    # ── 위반 카운트 정보 박스 ──
-    viol_lines = []
-    for ti in ('T1', 'T2', 'T3', 'T4'):
-        cnt = len(violations.get(ti, set()))
-        viol_lines.append(f"{ti}: {cnt}건")
-    info_txt = (
-        f"모드: {phase_label}\n"
-        f"부분군 수: {m}\n"
-        f"위반 — " + "  ".join(viol_lines)
-    )
-    xbox = AnchoredText(info_txt, loc='lower right', prop=dict(size=9), frameon=True)
-    xbox.patch.set_alpha(0.88)
-    xbox.patch.set_facecolor(C['ax_bg'])
-    ax.add_artist(xbox)
-
     # ── 제목 / 축 라벨 ──
     chart_kr = _CHART_TYPE_KR.get(chart_type, chart_type)
-    ax.set_title(f'{chart_kr} 관리도 [{phase_label}]',
-                 fontweight='bold', fontsize=12, pad=8)
+    fig.suptitle(f'{chart_kr} 관리도 · {phase_label}', x=.06, y=.982,
+                 ha='left', fontweight='bold', fontsize=14)
     ax.set_xlabel('부분군 번호', fontsize=10)
-    ax.set_ylabel(_Y_LABEL_KR.get(chart_type, chart_type), fontsize=10)
+    ax.set_ylabel('불량률 (%)' if chart_type == 'p' else _Y_LABEL_KR[chart_type], fontsize=10)
+    if chart_type == 'p':
+        from matplotlib.ticker import PercentFormatter
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1))
+    ax.grid(False, axis='x')
+    ax.spines[['top', 'right']].set_visible(False)
 
     # ── X 틱 라벨 ──
     x_labels = result.get('x_labels', [])
@@ -333,9 +293,9 @@ def build_attribute_control_chart(
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
     ax.tick_params(axis='y', which='minor', direction='in', length=3)
     ax.margins(y=0.12)
-    ax.legend(loc='upper right', frameon=True, framealpha=0.88, fontsize=9.5, ncol=2)
+    ax.legend(loc='lower left', bbox_to_anchor=(0, 1), frameon=False, fontsize=8.5, ncol=4)
 
-    fig.tight_layout(pad=1.0)
+    fig.tight_layout(pad=1.0, rect=(0, 0, 1, .92))
     return fig
 
 
@@ -966,181 +926,75 @@ def build_overview_figure(
 # 6. Plotly 기반 인터랙티브 차트 빌더
 # ════════════════════════════════════════════════════════════════════
 
-def build_attribute_control_chart_plotly(
-    result: dict,
-    palette_name: str = 'trust',
-) -> Any:
-    """Plotly 기반 인터랙티브 계수형 관리도 생성"""
+def build_attribute_control_chart_plotly(result: dict, palette_name: str = 'trust') -> Any:
+    """Interactive attribute chart, with true subgroup-specific limits."""
+    from html import escape
+
     import plotly.graph_objects as go
+    from spc_charts import PALETTES as shared_palettes, control_chart_layout, control_chart_limits, control_chart_phase
 
     chart_type = result['chart_type']
     values = np.asarray(result['values'], dtype=float)
-    m = len(values)
-    cl = float(result['cl'])
-    ucl_raw = result['ucl']
-    lcl_raw = result['lcl']
-    violations = result.get('violations', {})
-    control_phase = str(result.get('control_phase', 'phase1'))
-    phase_label = str(result.get('control_phase_label', '해석용'))
+    count = len(values)
+    positions = np.arange(1, count+1)
+    left, right = .5, max(1, count)+.5
+    upper = _ensure_array(result['ucl'], count)
+    lower = np.maximum(0, _ensure_array(result['lcl'], count))
+    center = float(result['cl'])
+    colors = shared_palettes.get(palette_name, shared_palettes[DEFAULT_PALETTE])
+    chart_name = _CHART_TYPE_KR.get(chart_type, chart_type)
+    phase = result.get('control_phase', 'phase1')
+    phase_label = result.get('control_phase_label', '해석용')
+    labels = result.get('x_labels', [])
+    named = bool(labels and len(labels) == count)
+    baseline = int(result.get('baseline_display_count', result.get('baseline_count', count)))
+    rules = result.get('violations', {})
+    fmt = '.3%' if chart_type == 'p' else '.6g'
+    hover = []
+    for i, (value, hi, lo) in enumerate(zip(values, upper, lower)):
+        label = f" · {escape(str(labels[i]))}" if named else ''
+        active = ', '.join(key for key in ('T1', 'T2', 'T3', 'T4') if i in rules.get(key, ()))
+        status = f'위반 규칙: {active}' if active else '이상 신호 없음'
+        window = (' · 기준구간' if i < baseline else ' · 감시구간') if phase == 'phase2' else ''
+        hover.append(f'<b>부분군 {i+1}{label}{window}</b><br>'
+                     f'<b>{chart_name} {value:{fmt}}</b><br>'
+                     f'UCL {hi:{fmt}} / CL {center:{fmt}} / LCL {lo:{fmt}}<br>{status}')
 
-    ucl_arr = _ensure_array(ucl_raw, m)
-    lcl_arr = _ensure_array(lcl_raw, m)
-
-    x_labels = result.get('x_labels', [])
-    has_x_labels = bool(x_labels and len(x_labels) == m)
-    xs = np.asarray(x_labels, dtype=object) if has_x_labels else np.arange(1, m + 1)
-    p = PALETTES.get(palette_name, PALETTES[DEFAULT_PALETTE])
-
-    C = p
-    fig = go.Figure()
-
-    # 1. 중심선 (CL)
-    fig.add_trace(go.Scatter(
-        x=xs, y=np.full(m, cl),
-        mode='lines',
-        line=dict(color=p['mean'], width=1.8, dash='dash'),
-        name=f"CL ({cl:.4f})",
-        hoverinfo='skip'
-    ))
-
-    # 2. UCL
-    fig.add_trace(go.Scatter(
-        x=xs, y=ucl_arr,
-        mode='lines',
-        line=dict(color=p['danger'], width=1.2, dash='dot'),
-        name="UCL",
-        line_shape='hvh' if _is_variable_limit(chart_type) else 'linear',
-        hoverinfo='skip'
-    ))
-
-    # 3. LCL
-    fig.add_trace(go.Scatter(
-        x=xs, y=np.maximum(0.0, lcl_arr),
-        mode='lines',
-        line=dict(color=p['success'], width=1.2, dash='dot'),
-        name="LCL",
-        line_shape='hvh' if _is_variable_limit(chart_type) else 'linear',
-        hoverinfo='skip'
-    ))
-
-    # 4. 데이터 플롯
-    custom_hover = []
-    val_fmt = ".4f" if chart_type in ('p', 'u') else ".1f"
-    for i in range(m):
-        val_i = values[i]
-        u_i = ucl_arr[i]
-        l_i = max(0.0, lcl_arr[i])
-        status = "이상 신호 없음"
-        violated_rules = []
-        for rk in ["T1", "T2", "T3", "T4"]:
-            if i in violations.get(rk, set()):
-                violated_rules.append(rk)
-        if violated_rules:
-            status = f"이탈 ({', '.join(violated_rules)})"
-
-        custom_hover.append(
-            f"부분군: {x_labels[i] if has_x_labels else i+1}<br>"
-            f"측정값: {val_i:{val_fmt}}<br>"
-            f"UCL: {u_i:.4f}<br>"
-            f"LCL: {l_i:.4f}<br>"
-            f"상태: {status}"
-        )
-
-    fig.add_trace(go.Scatter(
-        x=xs, y=values,
-        mode='lines+markers',
-        marker=dict(color=p['primary'], size=6),
-        line=dict(color=p['primary'], width=1.8),
-        name=_CHART_TYPE_KR.get(chart_type, chart_type),
-        text=custom_hover,
-        hovertemplate="%{text}<extra></extra>"
-    ))
-
-    # 5. 위반점 특별 마킹
-    mark_styles = {
-        'T1': dict(symbol='circle', size=11, color='#E53935', name='T1 (한계 이탈)'),
-        'T2': dict(symbol='square', size=9, color=p['accent'], name='T2 (연속 편향)'),
-        'T3': dict(symbol='triangle-up', size=10, color=p['warning'], name='T3 (추세)'),
-        'T4': dict(symbol='diamond', size=9, color=p['muted'], name='T4 (교대 반복)'),
+    figure = go.Figure()
+    figure.add_trace(go.Scatter(x=positions, y=values, mode='lines+markers', name=chart_name,
+                                line=dict(color=colors['primary'], width=2.2), marker=dict(size=7),
+                                text=hover, hovertemplate='%{text}<extra></extra>'))
+    marker_styles = {
+        'T2': ('square', colors['accent'], 'T2 (연속 편향)'),
+        'T3': ('triangle-up', colors['warning'], 'T3 (추세)'),
+        'T4': ('diamond', colors['muted'], 'T4 (교대 반복)'),
+        'T1': ('circle', colors['danger'], 'T1 (한계 이탈)'),
     }
+    for key, (symbol, color, name) in marker_styles.items():
+        indices = [i for i in sorted(rules.get(key, ())) if 0 <= i < count]
+        if indices:
+            figure.add_trace(go.Scatter(x=positions[indices], y=values[indices], mode='markers', name=name,
+                                        marker=dict(symbol=symbol, color=color, size=12 if key == 'T1' else 10,
+                                                    line=dict(color=colors['ax_bg'], width=1.2)),
+                                        text=[hover[i] for i in indices], hovertemplate='%{text}<extra></extra>'))
 
-    for rk in ('T2', 'T3', 'T4', 'T1'):
-        style = mark_styles[rk]
-        pts = sorted(list(violations.get(rk, set())))
-        if pts:
-            valid_pts = [pt for pt in pts if 0 <= pt < m]
-            if valid_pts:
-                xs_pts = [xs[pt] for pt in valid_pts]
-                ys_pts = [values[pt] for pt in valid_pts]
-                hover_pts = [custom_hover[pt] for pt in valid_pts]
-
-                fig.add_trace(go.Scatter(
-                    x=xs_pts, y=ys_pts,
-                    mode='markers',
-                    marker=dict(
-                        symbol=style['symbol'],
-                        size=style['size'],
-                        color=style['color'],
-                        line=dict(color='white', width=1)
-                    ),
-                    name=style['name'],
-                    text=hover_pts,
-                    hovertemplate="%{text}<extra></extra>"
-                ))
-
-    baseline_count = int(result.get('baseline_count', m))
-    if control_phase == 'phase2' and 0 < baseline_count < m:
-        # Category coordinates preserve the existing lot/date hover labels.
-        boundary = baseline_count - 0.5 if has_x_labels else baseline_count + 0.5
-        start = -0.5 if has_x_labels else 0.5
-        fig.add_vrect(x0=start, x1=boundary, fillcolor=p['accent'],
-                      opacity=0.08, line_width=0, layer='below')
-        fig.add_vline(x=boundary, line_dash='dot', line_color=p['muted'])
-        for x, label in ((0.01, '기준구간'), (0.99, '감시구간')):
-            fig.add_annotation(x=x, y=0.98, xref='paper', yref='paper',
-                               text=label, showarrow=False,
-                               xanchor='left' if x < 0.5 else 'right',
-                               font=dict(color=p['text']), bgcolor=p['ax_bg'])
-
-    chart_kr = _CHART_TYPE_KR.get(chart_type, chart_type)
-    fig.update_layout(
-        title=dict(
-            text=f"{chart_kr} 관리도 [{phase_label}]",
-            x=0.5, y=0.96,
-            xanchor='center', yanchor='top',
-            font=dict(size=14, color=C['text'], family="Malgun Gothic")
-        ),
-        xaxis=dict(
-            title="측정일자/로트" if has_x_labels else "부분군 번호",
-            nticks=min(20, m),
-            tickangle=-35 if has_x_labels else 0,
-            gridcolor=p['grid']
-        ),
-        yaxis=dict(
-            title=_Y_LABEL_KR.get(chart_type, chart_type),
-            gridcolor=p['grid']
-        ),
-        margin=dict(l=40, r=40, t=55, b=40),
-        plot_bgcolor=C['ax_bg'],
-        font=dict(family='Malgun Gothic', size=12, color=C['text']),
-        dragmode='zoom',
-        paper_bgcolor=p['bg'],
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=9.5)
-        ),
-        hoverlabel=dict(
-            bgcolor=C['ax_bg'],
-            font_size=12, font_color=C['text'],
-            font_family="Malgun Gothic"
-        ),
-        height=480
-    )
-    return fig
+    varying = []
+    limits = [('UCL', upper), ('CL', center), ('LCL', lower)]
+    for label, limit in (limits[0], limits[2]):
+        if count and not np.all(limit == limit[-1]):
+            varying.append(label)
+            figure.add_trace(go.Scatter(x=np.r_[left, positions, right], y=np.r_[limit[0], limit, limit[-1]],
+                                        mode='lines', line_shape='hvh', showlegend=False, hoverinfo='skip',
+                                        line=dict(color=colors['danger'], width=1.4, dash='dash'), name=label))
+    control_chart_layout(figure, colors, f'<b>{chart_name} 관리도</b> · {phase_label}', height=515)
+    control_chart_limits(figure, colors, values, limits, formatter=lambda value: format(value, fmt), varying=varying)
+    if phase == 'phase2':
+        control_chart_phase(figure, colors, left, right, baseline+.5)
+    figure.update_xaxes(range=[left, right], title_text='부분군 번호', dtick=1 if count <= 12 else None)
+    figure.update_yaxes(title_text='불량률 (%)' if chart_type == 'p' else _Y_LABEL_KR[chart_type])
+    if chart_type == 'p':
+        figure.update_yaxes(tickformat='.2~%')
+    return figure
 
 
 def build_cumulative_defect_chart_plotly(

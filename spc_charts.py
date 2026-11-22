@@ -225,7 +225,7 @@ def build_control_chart(
         ref_count = max(0, min(int(ref_count), int(total_count)))
         if ref_count <= 0 or ref_count >= total_count:
             return
-        ax.axvspan(-0.5, ref_count - 0.5, facecolor=C['accent'], alpha=0.08, zorder=0.1)
+        ax.axvspan(-0.5, ref_count - 0.5, facecolor=C['accent'], alpha=0.045, zorder=0.1)
         ax.axvline(ref_count - 0.5, color=C['muted'], linestyle=':', linewidth=1.1, alpha=0.9)
         ax.text(
             0.01,
@@ -393,7 +393,7 @@ def build_control_chart(
         ax_r.axhline(r_bar, linestyle='--', color=C['muted'], linewidth=style["line"], label=f'{r_lab}-bar')
     if np.isfinite(r_ucl):
         ax_r.axhline(r_ucl, linestyle=(0, (6, 4)), color=C['danger'], linewidth=style["line"], label=f'UCL({r_lab})')
-    if np.isfinite(r_lcl) and r_lcl > 0:
+    if np.isfinite(r_lcl):
         ax_r.axhline(r_lcl, linestyle=(0, (6, 4)), color=C['danger'], linewidth=style["line"], label=f'LCL({r_lab})')
 
     # R ?꾨컲??媛뺤“
@@ -404,8 +404,8 @@ def build_control_chart(
     ax_r.set_xlim(ax_x.get_xlim())
     _shade_phase_window(ax_r, baseline_display_count, len(means))
     _limit_label(ax_r, r_ucl, f"UCL={_fmt(r_ucl, decimals)}", C['danger'], fontsize=style["side"])
-    _limit_label(ax_r, r_bar, f"{r_lab}-bar={_fmt(r_bar, decimals)}", C['muted'], fontsize=style["side"])
-    if np.isfinite(r_lcl) and r_lcl > 0:
+    _limit_label(ax_r, r_bar, f"CL={_fmt(r_bar, decimals)}", C['muted'], fontsize=style["side"])
+    if np.isfinite(r_lcl):
         _limit_label(ax_r, r_lcl, f"LCL={_fmt(r_lcl, decimals)}", C['danger'], fontsize=style["side"])
 
     ax_r.set_title(f'변동 · {r_lab}', loc='left', color=text_color,
@@ -448,6 +448,81 @@ def build_control_chart(
     else:
         fig.subplots_adjust(left=0.075, right=0.87, top=0.77, bottom=0.12, hspace=0.48)
     return fig
+
+
+def control_chart_layout(figure, colors, title, *, height, top=105, right=120, bottom=60):
+    """Common Plotly frame for variable, attribute and extended control charts."""
+    ink = '#E2E8F0' if colors is PALETTES['dark'] else '#1E293B'
+    background = colors['ax_bg']
+    figure.update_layout(
+        height=height, paper_bgcolor=background, plot_bgcolor=background,
+        font=dict(family='Malgun Gothic, Arial, sans-serif', color=ink, size=14),
+        hovermode='closest', dragmode='pan',
+        hoverlabel=dict(bgcolor=background, font_size=14, font_color=ink),
+        title=dict(text=title, x=0, xref='paper', xanchor='left', y=.98, yref='container',
+                   yanchor='top', font=dict(size=21, color=ink)),
+        margin=dict(l=78, r=right, t=top, b=bottom),
+        legend=dict(orientation='h', x=0, y=1 + 29/(height-top-bottom), yanchor='bottom', font=dict(size=12)),
+    )
+    figure.update_xaxes(showgrid=False, showline=True, linecolor=colors['grid'],
+                         nticks=12, automargin=True, showspikes=True, spikemode='across',
+                         spikesnap='cursor', spikecolor=colors['muted'])
+    figure.update_yaxes(showgrid=True, gridcolor=colors['grid'], zeroline=False, nticks=6, automargin=True)
+
+
+def control_chart_phase(figure, colors, left, right, boundary, *, row=None, labels=True):
+    """Show the same Phase 2 boundary and light reference tint on each panel."""
+    if boundary is None or not left < boundary < right:
+        return
+    panel = {} if row is None else dict(row=row, col=1)
+    figure.add_vrect(x0=left, x1=boundary, fillcolor=colors['accent'], opacity=.045,
+                     line_width=0, layer='below', **panel)
+    figure.add_vline(x=boundary, line_dash='dot', line_width=1.5, line_color=colors['muted'], **panel)
+    if labels:
+        suffix = '' if row in (None, 1) else str(row)
+        for x, label, anchor in ((.015, '기준구간', 'left'), (.985, '감시구간', 'right')):
+            figure.add_annotation(x=x, y=.985, xref=f'x{suffix} domain', yref=f'y{suffix} domain',
+                                  text=label, xanchor=anchor, yanchor='top', showarrow=False,
+                                  font=dict(size=11, color=colors['muted']), bgcolor=colors['ax_bg'])
+
+
+def control_chart_limits(figure, colors, values, limits, *, row=None, axis_range=None,
+                         formatter=None, varying=()):
+    """Draw fixed limits and label the end of variable limits without averaging them."""
+    panel = {} if row is None else dict(row=row, col=1)
+    suffix = '' if row in (None, 1) else str(row)
+    endpoints = [(label, float(np.asarray(limit).flat[-1])) for label, limit in limits
+                 if np.size(limit) and np.isfinite(np.asarray(limit).flat[-1])]
+    if axis_range is None or axis_range[0] >= axis_range[1]:
+        extent = np.concatenate([np.ravel(values), *(np.ravel(limit) for _, limit in limits)])
+        extent = extent[np.isfinite(extent)]
+        if not extent.size:
+            return
+        low, high = float(extent.min()), float(extent.max())
+        pad = (high-low)*.13 or max(abs(high)*.05, .001)
+        axis_range = [low-pad, high+pad]
+    figure.update_yaxes(range=axis_range, **panel)
+    axis = figure.layout[f'yaxis{suffix}']
+    height = figure.layout.height - figure.layout.margin.t - figure.layout.margin.b
+    domain_height = axis.domain[1] - axis.domain[0] if axis.domain else 1
+    plot_height = height * domain_height
+    span = axis_range[1] - axis_range[0]
+    previous = -np.inf
+    for pos, (label, value) in enumerate(sorted(endpoints, key=lambda item: item[1])):
+        color = colors['muted'] if label == 'CL' else colors['danger']
+        if label not in varying:
+            figure.add_hline(y=value, line_dash='dot' if label == 'CL' else 'dash',
+                             line_width=1.4, line_color=color, layer='below', **panel)
+        actual = (value-axis_range[0]) * plot_height / span
+        ceiling = plot_height - (len(endpoints)-pos-1)*18
+        label_pixel = min(max(actual, previous+18), ceiling)
+        previous = label_pixel
+        text = f'<b>{label}</b> · 부분군별' if label in varying else (
+            f'<b>{label}</b> {formatter(value) if formatter else format(value, ".6g")}')
+        figure.add_annotation(x=1, y=value, xref=f'x{suffix} domain', yref=f'y{suffix}', xshift=7,
+                              text=text, xanchor='left', yanchor='middle', showarrow=False,
+                              yshift=label_pixel-actual, font=dict(size=12, color=color),
+                              bgcolor=colors['ax_bg'], borderpad=2)
 
 
 def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=None, show_zones=None):
@@ -518,35 +593,15 @@ def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=Non
         hovertemplate=hover), row=1, col=1)
     for annotation in figure.layout.annotations:
         annotation.update(x=0, xanchor='left', font=dict(size=17, color=ink))
-    for row, keys in [(1,('ucl','xbarbar','lcl')), (2,('r_ucl','r_bar','r_lcl'))]:
-        # Space the right-hand labels even when two limits are very close.
-        values = np.asarray(means if row == 1 else ranges, dtype=float)
-        extent = np.concatenate((values, np.asarray([it[k] for k in keys], dtype=float)))
-        extent = extent[np.isfinite(extent)]
-        shifts = {}
-        if extent.size:
-            low, high = float(extent.min()), float(extent.max())
-            pad = (high - low) * .12 or max(abs(high) * .05, .001)
-            axis_range = [low-pad, high+pad]
-            figure.update_yaxes(range=axis_range, row=row, col=1)
-            domain = (figure.layout.yaxis if row == 1 else figure.layout.yaxis2).domain
-            pixels_per_unit = 600 * (domain[1]-domain[0]) / (axis_range[1]-axis_range[0])
-            last_pixel = -np.inf
-            for key in sorted((k for k in keys if np.isfinite(it[k])), key=lambda k: it[k]):
-                actual_pixel = (it[key]-axis_range[0]) * pixels_per_unit
-                label_pixel = max(actual_pixel, last_pixel+23)
-                shifts[key] = label_pixel-actual_pixel
-                last_pixel = label_pixel
-        for key,label in zip(keys,('UCL','CL','LCL')):
-            value=it[key]
-            if np.isfinite(value):
-                figure.add_hline(y=value,row=row,col=1,line_dash='dash',line_width=1.5,
-                    line_color=colors['muted'] if label=='CL' else colors['danger'],
-                    annotation_text=f'<b>{label}</b> {value:.6g}',annotation_position='right',
-                    annotation_font=dict(size=14, color=ink),annotation_bgcolor=colors['ax_bg'],
-                    annotation_borderpad=4,annotation_yshift=shifts.get(key,0))
-        if it.get('control_phase')=='phase2':
-            figure.add_vline(x=offset+it['baseline_display_count']+.5,row=row,col=1,line_dash='dot',line_color=colors['muted'])
+    control_chart_layout(figure, colors, f'<b>{chart_name}</b> · {escape(str(it["column"]))}',
+                         height=760, top=123, right=148)
+    left, right = offset+.5, offset+len(means)+.5
+    for row, values, keys in ((1, means, ('ucl','xbarbar','lcl')), (2, ranges, ('r_ucl','r_bar','r_lcl'))):
+        limits = [(label, it[key]) for label, key in zip(('UCL','CL','LCL'), keys)]
+        control_chart_limits(figure, colors, values, limits, row=row)
+        if it.get('control_phase') == 'phase2':
+            boundary = offset + it['baseline_display_count'] + .5
+            control_chart_phase(figure, colors, left, right, boundary, row=row, labels=row == 1)
     if show_zones is not None and it.get('distribution_mode') != 'nonnormal':
         cl, upper, lower = it['xbarbar'], it['ucl'], it['lcl']
         sigma = (upper-lower)/6 if np.isfinite(upper) and np.isfinite(lower) else np.nan
@@ -557,28 +612,18 @@ def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=Non
                         figure.add_hrect(y0=cl+low*sigma,y1=cl+high*sigma,
                             fillcolor=colors['zone3' if zone=='Z3' else 'zone'+zone],opacity=.14,line_width=0,
                             layer='below',row=1,col=1)
-    figure.update_layout(height=760,hovermode='closest',dragmode='pan',
-        paper_bgcolor=colors['ax_bg'],plot_bgcolor=colors['ax_bg'],
-        font=dict(color=ink, size=15), hoverlabel=dict(font_size=16, bgcolor=colors['ax_bg'], font_color=ink),
-        title=dict(text=f'<b>{chart_name}</b> · {escape(str(it["column"]))}', x=0, xref='paper', xanchor='left',
-                   y=.98, yref='container', yanchor='top', font=dict(size=22, color=ink)),
-        margin=dict(l=75,r=155,t=123,b=60,autoexpand=False),
-        legend=dict(orientation='h',y=1.08,yanchor='bottom',x=0,font=dict(size=14)),
-        uirevision=f"{it['column']}:{offset}:{len(means)}:{it['ucl']}:{it['r_ucl']}")
-    figure.update_xaxes(range=[offset+.5,offset+len(means)+.5],showgrid=False,
-                         tickfont=dict(size=14), nticks=12, automargin=True,
-                         showspikes=True, spikemode='across', spikesnap='cursor', spikecolor=colors['muted'])
+    figure.update_layout(uirevision=f"{it['column']}:{offset}:{len(means)}:{it['ucl']}:{it['r_ucl']}")
+    figure.update_xaxes(range=[left, right])
     figure.update_xaxes(title_text='측정 순서',row=2,col=1)
     figure.update_xaxes(title_text=None,row=1,col=1)
     figure.update_xaxes(showticklabels=True,row=1,col=1)
-    figure.update_yaxes(gridcolor=colors['grid'],zeroline=False,tickfont=dict(size=14),nticks=6,automargin=True)
     return figure
 
 
-EXTENDED_PANEL_STYLES = {
-    "확장 X̄": ("확장 X̄ · 예상 평균 이동 반영", "success"),
-    "S": ("S · 부분군 내 산포", "accent"),
-    "일반 X̄": ("일반 X̄ · 비교용", "primary"),
+EXTENDED_PANEL_TITLES = {
+    "확장 X̄": "확장 X̄ · 예상 평균 이동 반영",
+    "S": "S · 부분군 내 산포",
+    "일반 X̄": "일반 X̄ · 비교용",
 }
 
 
@@ -590,10 +635,6 @@ def extended_chart_window(table):
     return left, right, start
 
 
-def extended_limits_display(limits):
-    return "    ".join(f"{label} {value:.7g}" for label, value in zip(("UCL", "CL", "LCL"), limits[::-1]))
-
-
 def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compare=False):
     from spc_extended import display_panels, mean_axis_limits
 
@@ -601,42 +642,47 @@ def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compar
     table = result["table"] if table is None else table
     ink = "#E2E8F0" if palette == "dark" else "#192C43"
     panels = display_panels(compare)
-    fig, axes = plt.subplots(len(panels), 1, figsize=(12, 7.9 if compare else 5.7), sharex=True)
-    fig.subplots_adjust(left=.105, right=.96, top=.84, bottom=.10, hspace=.53)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(12, 7.9 if compare else 5.7), sharex=True, facecolor=colors["ax_bg"])
+    fig.subplots_adjust(left=.105, right=.88, top=.84, bottom=.10, hspace=.53)
     x = table["부분군"]
     left, right, start = extended_chart_window(table)
     legend = [
         Line2D([], [], color=colors["muted"], lw=1.2, ls=(0, (1, 2)), label="중심선"),
-        Line2D([], [], color=colors["accent"], lw=1.4, ls=(0, (5, 3)), label="관리한계"),
-        Line2D([], [], color=colors["danger"], marker="D", ls="None", markersize=5, label="관리한계 이탈"),
-        Rectangle((0, 0), 1, 1, fc=colors["primary"], ec="none", alpha=.08, label="감시구간"),
+        Line2D([], [], color=colors["danger"], lw=1.4, ls=(0, (5, 3)), label="관리한계"),
+        Line2D([], [], color=colors["danger"], marker="o", ls="None", markersize=5, label="관리한계 이탈"),
+        Rectangle((0, 0), 1, 1, fc=colors["primary"], ec="none", alpha=.045, label="기준구간"),
         Rectangle((0, 0), 1, 1, fc=colors["success"], ec="none", alpha=.13, label="예상 평균 범위"),
     ]
     fig.legend(handles=legend, loc="upper left", bbox_to_anchor=(.09, .988), ncol=5,
                frameon=False, fontsize=9)
-    for ax, (name, value) in zip(axes, panels):
-        title, color = EXTENDED_PANEL_STYLES[name]
-        accent = colors[color]
+    for index, (ax, (name, value)) in enumerate(zip(axes, panels)):
+        title = EXTENDED_PANEL_TITLES[name]
+        accent = colors["primary"]
         bad = table[name + " 판정"] != "이내"
         ax.set_axisbelow(True)
         ax.grid(axis="x", visible=False)
         ax.spines[["top", "right"]].set_visible(False)
-        if start is not None:
-            ax.axvspan(start, right, color=colors["primary"], alpha=.065, lw=0, zorder=0)
-            if start > left:
-                ax.axvline(start, color=colors["primary"], alpha=.65, lw=1.1, zorder=2)
+        if start is not None and left < start < right:
+            ax.axvspan(left, start, color=colors["accent"], alpha=.045, lw=0, zorder=0)
+            ax.axvline(start, color=colors["muted"], ls=":", lw=1.2, zorder=2)
+            if index == 0:
+                ax.text(.01, .98, "기준구간", transform=ax.transAxes, va="top", fontsize=8, color=colors["muted"])
+                ax.text(.99, .98, "감시구간", transform=ax.transAxes, ha="right", va="top", fontsize=8, color=colors["muted"])
         if name == "확장 X̄":
-            ax.axhspan(result["lower"], result["upper"], color=accent, alpha=.12, lw=0, zorder=0)
+            ax.axhspan(result["lower"], result["upper"], color=colors["success"], alpha=.12, lw=0, zorder=0)
         ax.plot(x, table[value], color=accent, marker="o" if len(x) <= 200 else None, ms=3.2, lw=1.55)
-        ax.scatter(x[bad], table.loc[bad, value], c=colors["danger"], marker="D", s=30,
+        ax.scatter(x[bad], table.loc[bad, value], c=colors["danger"], marker="o", s=30,
                    edgecolors=colors["ax_bg"], linewidths=.6, zorder=5)
         limits = result["limits"][name]
         for i, limit in enumerate(limits):
             ax.axhline(limit, linestyle=(0, (1, 2) if i == 1 else (5, 3)),
-                       color=colors["muted"] if i == 1 else colors["accent"], lw=1.1, zorder=2)
+                       color=colors["muted"] if i == 1 else colors["danger"], lw=1.1, zorder=2)
         ax.set_title(title.replace("X̄", r"$\overline{X}$"),
                      loc="left", pad=11, fontsize=12, weight="bold", color=ink)
-        ax.set_title(extended_limits_display(limits), loc="right", pad=12, fontsize=9, color=colors["muted"])
+        for label, limit in zip(("LCL", "CL", "UCL"), limits):
+            ax.annotate(f"{label} {limit:.6g}", xy=(1, limit), xycoords=ax.get_yaxis_transform(),
+                        xytext=(5, 0), textcoords="offset points", va="center", fontsize=8,
+                        color=colors["muted"] if label == "CL" else colors["danger"])
         if value == "평균":
             ax.set_ylim(mean_axis_limits(result, table))
         ax.set_ylabel(value)
@@ -1181,11 +1227,11 @@ def build_overview_2x2(
 
     xs3 = list(range(len(means)))
     ax3.plot(xs3, means, marker='o', markersize=3.2, color=C['primary'], linewidth=1.2)
-    ax3.axhline(xbarbar, linestyle='--', color=C['warning'], linewidth=1.2)
+    ax3.axhline(xbarbar, linestyle='--', color=C['muted'], linewidth=1.2)
     if np.isfinite(ucl):
         ax3.axhline(ucl, linestyle=(0, (6, 4)), color=C['danger'], linewidth=1.2, label='UCL')
     if np.isfinite(lcl):
-        ax3.axhline(lcl, linestyle=(0, (6, 4)), color=C['success'], linewidth=1.2, label='LCL')
+        ax3.axhline(lcl, linestyle=(0, (6, 4)), color=C['danger'], linewidth=1.2, label='LCL')
     ax3.set_xlim(-0.5, len(means) - 0.5)
 
     # KSQ 留덊궧 (媛쒖슂??異뺤냼)
@@ -1205,20 +1251,21 @@ def build_overview_2x2(
     ax3.margins(y=0.13)
 
     # ???????????? [1,1] R/S/MR 愿由щ룄 ????????????
-    ax4.plot(list(range(len(ranges))), ranges, marker='o', markersize=3.5,
+    range_offset = int(is_xmr)
+    ax4.plot(np.arange(len(ranges)) + range_offset, ranges, marker='o', markersize=3.5,
              color=C['primary'], linewidth=1.2)
     if np.isfinite(r_bar):
-        ax4.axhline(r_bar, linestyle='--', color=C['warning'], linewidth=1.2, label=f'{r_lab}-bar')
+        ax4.axhline(r_bar, linestyle='--', color=C['muted'], linewidth=1.2, label=f'{r_lab}-bar')
     if np.isfinite(r_ucl):
         ax4.axhline(r_ucl, linestyle=(0, (6, 4)), color=C['danger'], linewidth=1.2, label=f'UCL({r_lab})')
-    if np.isfinite(r_lcl) and r_lcl > 0:
-        ax4.axhline(r_lcl, linestyle=(0, (6, 4)), color=C['success'], linewidth=1.2, label=f'LCL({r_lab})')
+    if np.isfinite(r_lcl):
+        ax4.axhline(r_lcl, linestyle=(0, (6, 4)), color=C['danger'], linewidth=1.2, label=f'LCL({r_lab})')
 
     for i_r, rval in enumerate(ranges):
         if (np.isfinite(r_ucl) and rval > r_ucl) or (np.isfinite(r_lcl) and rval < r_lcl):
-            ax4.scatter(i_r, rval, s=30, c=C['danger'], zorder=3)
+            ax4.scatter(i_r + range_offset, rval, s=30, c=C['danger'], zorder=3)
 
-    ax4.set_xlim(-0.5, len(ranges) - 0.5)
+    ax4.set_xlim(ax3.get_xlim())
     ax4.set_title(f'{r_lab} 관리도', fontsize=10, fontweight='bold')
     ax4.set_ylabel(r_lab, fontsize=9)
     ax4.margins(y=0.13)
@@ -1230,7 +1277,10 @@ def build_overview_2x2(
         (ax4, len(ranges), n, it.get('r_labels')),
     ]:
         lbls = _labels_or_fallback(raw_labels, m_, n_, is_xmr)
-        ticks = list(range(m_))
+        offset = range_offset if ax_ is ax4 else 0
+        ticks = list(range(offset, m_ + offset))
+        if ax_ is ax4 and is_xmr and not raw_labels:
+            lbls = [str(i + 2) for i in range(m_)]
         if m_ > 12:
             step = math.ceil(m_ / 12)
             ax_.set_xticks(ticks[::step])
