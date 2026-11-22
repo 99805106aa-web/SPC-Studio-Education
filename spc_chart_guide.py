@@ -168,6 +168,14 @@ def _prepare_pearson(chart, subgroup_size, *, use_example=False):
     state.update(_guide_pearson_requested=subgroup_size, beginner_mode=False, advanced_tabs='📉 관리도')
 
 
+def _load_variable_tutorial_sample(chart, subgroup_size):
+    from spc_education import load_sample
+
+    scenario = {'imr': 'imr', 'xbar_s': 'xbar_s'}.get(chart, 'stable')
+    load_sample(scenario, chart=chart)
+    _select_chart(chart, subgroup_size=subgroup_size)
+
+
 def _tutorial_run(attribute):
     st.session_state['_guide_attribute_run' if attribute else '_trigger_analysis'] = True
 
@@ -332,9 +340,12 @@ def _render_tutorial_recommendation(chart, attribute, selected, planned_n, ready
         st.button(f'{chart} 실습 데이터 불러오기', key='guide_tutorial_attribute_example',
                   on_click=load_attribute_tutorial_sample, args=(chart,))
         st.caption(f'실습은 초기 부분군 {TUTORIAL_BASELINE}개로 관리한계를 정하고, 이후 2개에서 관리한계 이탈을 찾아봅니다.')
-    if not attribute and chart in ('xbar_r', 'xbar_s') and planned_n == 5:
-        from spc_education import load_sample
-        st.button("n=5 실습 데이터 불러오기", on_click=load_sample, kwargs={'chart': chart})
+    elif chart != EXTENDED_MODE:
+        st.button('실습 데이터 불러오기', key='guide_tutorial_variable_example',
+                  on_click=_load_variable_tutorial_sample, args=(chart, planned_n),
+                  help='통합 예제의 측정값과 규격을 불러오고 추천 관리도 및 부분군 크기를 적용합니다.')
+        if chart != 'imr':
+            st.caption(f'실습 측정값을 파일 순서대로 {planned_n}개씩 묶습니다.')
     _render_tutorial_run(attribute, applied, ready)
 
 
@@ -401,11 +412,13 @@ def _render_practice(attribute):
                           args=(correct,), disabled=imr_blocked)
                 if imr_blocked:
                     st.caption(IMR_WIDE_GUIDANCE)
-            if not attribute and correct in ('xbar_r', 'xbar_s'):
-                from spc_education import load_sample
-                st.button("실습 데이터 불러오기", on_click=load_sample, kwargs={'chart': correct},
-                          help="현재 분석 입력에 합성 실습 데이터를 불러옵니다.")
-                st.caption("관리도 실습용 합성 측정값 150개를 5개씩 묶습니다. 데이터를 불러온 뒤 왼쪽의 ‘분석 시작’을 누르세요.")
+            if not attribute and correct != EXTENDED_MODE:
+                n = 1 if correct == 'imr' else 5
+                st.button('실습 데이터 불러오기', key='guide_variable_practice_example',
+                          on_click=_load_variable_tutorial_sample, args=(correct, n),
+                          help='통합 예제의 측정값과 규격을 불러옵니다.')
+                grouping = '개별값으로 분석합니다.' if n == 1 else '5개씩 묶어 분석합니다.'
+                st.caption(f'실습용 합성 측정값 150개를 {grouping} 데이터를 불러온 뒤 왼쪽의 ‘분석 시작’을 누르세요.')
         elif answer is not None:
             if attribute:
                 choice = ATTRIBUTE_CHARTS[answer]
