@@ -8,8 +8,32 @@ from scipy import stats
 
 _cache = OrderedDict()
 _lock = RLock()
+SHAPE_GUIDANCE = ('정규성 근사 참고 기준: 왜도 절댓값 ≤ 2이고 첨도 절댓값 ≤ 7이면 정규성을 근사적으로 판단할 수 있습니다. '
+                  '정규분포의 왜도는 0, 첨도는 3입니다. 이 경험 기준만으로 정규성이 입증되는 것은 아니며, '
+                  '정규성 p값·히스토그램·Q-Q 도표를 함께 확인하세요.')
+
 STATUS_LABELS = {'rejected':'정규성 기각', 'not_rejected':'정규성 기각되지 않음',
                  'unavailable':'검정 불가', 'not_evaluated':'상세 분석 필요'}
+
+
+def shape_magnitude(value):
+    return abs(value) if value is not None and np.isfinite(value) else None
+
+
+def shape_text(value):
+    magnitude = shape_magnitude(value)
+    return '—' if magnitude is None else f'{magnitude:.3f}'
+
+
+def shape_summary_display(frame):
+    import pandas as pd
+
+    if '일반 첨도' in frame and '첨도' not in frame:
+        frame = frame.rename(columns={'일반 첨도': '첨도'})
+    for label in ('왜도', '첨도'):
+        if label in frame:
+            frame[label] = pd.to_numeric(frame[label], errors='coerce').abs()
+    return frame
 
 
 def pvalue_text(value):
@@ -39,7 +63,7 @@ def normality_diagnostics(values, alpha=.05):
     sample = _normality_sample(values)
     record = dict(test=None, statistic=None, adjusted_statistic=None, pvalue=None,
                   alpha=float(alpha), status='unavailable', reason='',
-                  test_n=len(sample), total_n=len(values), skewness=None, excess_kurtosis=None,
+                  test_n=len(sample), total_n=len(values), skewness=None, kurtosis=None, excess_kurtosis=None,
                   sampling='전체 유효값' if len(sample)==len(values) else '전체 구간 고정 시드 표본',
                   message='')
     variable = len(values)>1 and np.ptp(values)>0
@@ -52,6 +76,7 @@ def normality_diagnostics(values, alpha=.05):
             if len(values)>=4:
                 kurt=float(stats.kurtosis(values,bias=False,fisher=True))
                 record['excess_kurtosis']=kurt if np.isfinite(kurt) else None
+                record['kurtosis']=kurt+3 if np.isfinite(kurt) else None
     if len(sample)<3:
         record['reason']=f'유효 표본수 {len(sample)} < 3'
     elif np.std(sample)==0:
@@ -124,24 +149,32 @@ def diagnostic_rows(results):
 
 def diagnostic_hint(record):
     if record.get('status')=='rejected':
-        return ('정규성 기각은 비대칭 분포의 확정을 뜻하지 않습니다. 왜도·초과첨도와 히스토그램·Q-Q·시간 패턴을 확인하고 '
+        return ('정규성 기각은 비대칭 분포의 확정을 뜻하지 않습니다. 왜도·첨도와 히스토그램·Q-Q·시간 패턴을 확인하고 '
                 '비정규 분포 진단에서 후보를 비교하세요. 꼬리 형태·혼합 집단·공정 변화도 검토하세요.')
     if record.get('status')=='not_rejected':
         return '정규성을 기각할 근거가 부족합니다. 정규분포나 공정 안정성이 입증된 것은 아닙니다.'
     return '검정에 필요한 유효 표본수와 산포를 확인하세요. 검정 불가를 정규성 기각으로 해석하지 마세요.'
 
 
-def diagnostics_html(it):
+def diagnostics_html(it, compact=False):
     from html import escape
+    if compact:
+        key = 'transformed' if it.get('box_cox_applied') else 'individual'
+        record = it.get('normality_diagnostics', {}).get(key)
+        if not record:
+            return '<div class="norm">정규성: 상세 분석 필요</div>'
+        unit = '변환값' if key == 'transformed' else '개별값'
+        text = (f"정규성({unit}): p={pvalue_text(record.get('pvalue'))} · {STATUS_LABELS[record['status']]}"
+                f" · 왜도 {shape_text(record.get('skewness'))} · 첨도 {shape_text(record.get('kurtosis'))}")
+        return '<div class="norm compact-diagnostics">'+escape(text)+'</div>'
     parts=[]
     for name,record in it.get('normality_diagnostics',{}).items():
-        shape=lambda value:'—' if value is None else f'{value:.3f}'
         text=(f"{record['target']} · {record['scope']} · {record['scale']} | "
               f"{record.get('test') or '검정 불가'} p={pvalue_text(record.get('pvalue'))} · {STATUS_LABELS[record['status']]} | "
-              f"왜도 {shape(record['skewness'])} · 초과첨도 {shape(record['excess_kurtosis'])} | "
+              f"왜도 {shape_text(record.get('skewness'))} · 첨도 {shape_text(record.get('kurtosis'))} | "
               f"검정 N={record['test_n']:,}/전체 N={record['total_n']:,}")
         parts.append('<p>'+escape(text)+'</p>')
     if not parts:
         return '<div class="norm">분포 진단: 상세 재분석 필요</div>'
-    return '<div class="norm"><b>분포 진단 · 정규성·형태</b>'+''.join(parts)+'<p>'+escape(diagnostic_hint(
+    return '<div class="norm"><b>분포 진단 · 정규성·형태</b>'+''.join(parts)+'<p>'+escape(SHAPE_GUIDANCE+' '+diagnostic_hint(
         it['normality_diagnostics']['individual']))+'</p></div>'

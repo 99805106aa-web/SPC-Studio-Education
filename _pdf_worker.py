@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def render_html_file_to_pdf(html_path: str) -> bytes:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import Error, sync_playwright
 
     # A4 가로 96dpi 기준 (297mm x 210mm)
     a4_landscape_w = 1122
@@ -20,7 +20,15 @@ def render_html_file_to_pdf(html_path: str) -> bytes:
         from spc_access import education_mode
         classroom = education_mode()
         executable = shutil.which("chromium") if sys.platform.startswith("linux") and classroom else None
-        browser = playwright.chromium.launch(**({"executable_path": executable} if executable else {}))
+        try:
+            browser = playwright.chromium.launch(**({"executable_path": executable} if executable else {}))
+        except Error as exc:
+            if sys.platform != "win32" or "Executable doesn't exist" not in str(exc):
+                raise
+            try:
+                browser = playwright.chromium.launch(channel="msedge")
+            except Error:
+                raise exc from None
         page = browser.new_page(viewport={"width": a4_landscape_w, "height": a4_landscape_h},
                                 java_script_enabled=not classroom)
         if classroom:

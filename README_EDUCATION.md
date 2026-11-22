@@ -25,20 +25,15 @@ Pearson 계산 버전 `2026.11.17.3`: AIAG–VDA 9.3.5.2에 따라 위치 관리
 
 사용 가능일은 한국시간 00:00부터 다음 날 00:00 전까지입니다. 날짜 전·후와 미설정 상태에서는 분석이 잠기며, 관리자는 잠긴 상태에서도 다음 교육일을 지정할 수 있습니다. **관리자 잠금**은 설정·관리 기능을 잠그며 당일 교육생의 분석 화면은 계속 열려 있습니다.
 
-관리자 비밀번호의 우선순위는 `SPC_ADMIN_PASSWORD` 환경변수 → Streamlit Secrets → 기존 SPC에 등록한 관리자 비밀번호 → MSA와 같은 기본 비밀번호 `0017080`입니다. 새 사용자 비밀번호와 최초 등록 절차는 없습니다. 관리자 인증은 브라우저 세션별이며, 비밀번호 변경·서버 재시작 후에는 다시 인증합니다. 세션 내 5회 실패 시 1분 대기합니다.
+관리자 비밀번호의 우선순위는 `SPC_ADMIN_PASSWORD` 환경변수 → Streamlit Secrets → 기존 SPC에 등록한 관리자 비밀번호 → 기본 비밀번호입니다. 새 사용자 비밀번호와 최초 등록 절차는 없습니다. 관리자 인증은 브라우저 세션별이며, 비밀번호 변경·서버 재시작 후에는 다시 인증합니다. 세션 내 5회 실패 시 1분 대기합니다.
 
 기존 SPC의 관리자 비밀번호 해시는 유지합니다. 예전 시작일·종료일이 같은 날이면 그 날짜를 사용합니다. 여러 날로 설정했다면 관리자가 사용 가능일 하루를 다시 저장해야 합니다. 저장 시 사용하지 않는 사용자 비밀번호 해시는 제거합니다.
 
 ## Streamlit Community Cloud 배포
 
-1. `python 보관자료/tools/build_education_bundle.py`로 `보관자료/dist/SPC_교육용_배포.zip`을 만듭니다.
-2. ZIP을 풀고 내용물만 교육 전용 GitHub 저장소에 업로드합니다.
-3. Streamlit Community Cloud에서 저장소·브랜치를 선택합니다.
-4. Main file path는 **education_app.py**, Python은 **3.12**를 선택합니다.
-5. 배포된 앱에서 위 절차로 사용일을 지정합니다.
-6. 교육생에게 실제 앱 URL을 공유합니다.
+일반용과 교육용은 같은 저장소의 `main` 브랜치에서 관리합니다. Streamlit은 `education_app.py`를 Python 3.12로 실행합니다. 일반용 PC 실행 방법은 [프로젝트 안내](README.md)를 참고하세요.
 
-현재 교육용 저장소: `99805106aa-web/SPC-Studio-Education`, 브랜치: `main`, 실행 파일: `education_app.py`.
+[기존 교육용 앱 열기](https://spc-studio-education-cws95g5pxnyshjfoymvije.streamlit.app/)
 
 배포된 앱에서는 **교육 접속 주소 · QR**에 실제 `*.streamlit.app` 접속 주소와 QR이 표시됩니다. **접속 QR PNG 내려받기**, **접속 주소 TXT 내려받기**로 강의자료에 사용할 수 있습니다. 사용일 전·후에도 접속 안내는 볼 수 있습니다. `localhost` 주소를 공개 URL처럼 표시하지 않습니다. 관리자 인증 후 공개 주소를 직접 저장하거나 Secrets의 `SPC_PUBLIC_URL`로 지정할 수도 있습니다.
 

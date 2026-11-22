@@ -77,6 +77,9 @@ def build_var_context(it: Dict[str, Any], beginner_mode: bool) -> Dict[str, Any]
         "control_phase": str(it.get("control_phase_label", "해석용")),
         "limit_reference": str(it.get("limit_reference_label", "")),
         "reliability_status": str(it.get("reliability_status", "")),
+        "assessment_settings": it.get('assessment_settings', {}),
+        "capability_criteria": it.get('capability_criteria', {}),
+        "study_conclusion": it.get('study_conclusion', ''),
         "reliability_reasons": list(it.get("reliability_reasons", []) or []),
         "baseline_status": str(it.get("baseline_status", "")),
         "baseline_reasons": list(it.get("baseline_reasons", []) or []),
@@ -107,7 +110,6 @@ def build_var_context(it: Dict[str, Any], beginner_mode: bool) -> Dict[str, Any]
         "chart_limit_method": it.get('chart_limit_method'),
         "dispersion_limit_method": it.get('dispersion_limit_method'),
         "capability_method": it.get('capability_method', 'normal'),
-        "assessment_settings": it.get('assessment_settings', {}),
         "sequence_review": it.get('sequence_review', {}),
         "study_conclusion": it.get('study_conclusion', ''),
         "capability_methods": it.get('capability_methods', {}),
@@ -163,6 +165,11 @@ def _fallback_interpretation(context: Dict[str, Any], admin_mode: bool, reason: 
         {"metric": "규격 이탈", "value": str(spec), "reason": "USL/LSL 벗어난 건수"},
         {"metric": "KSQ T1", "value": str(t1), "reason": "3σ 한계 밖 점 개수"},
     ]
+    if context.get('capability_criteria', {}).get('mode') == 'aiag_vda':
+        from spc_policy import criteria_description
+        summary = f"{col}: {context.get('study_conclusion', '자동 기준 검토 필요')}"
+        evidence.append({'metric':'AIAG·VDA 자동 기준', 'value':context.get('capability_criteria', {}).get('status', 'hold'),
+                         'reason':criteria_description(context)})
 
     if admin_mode:
         hypotheses = [
@@ -346,6 +353,7 @@ def _build_interpretation_prompt(context: Dict[str, Any], admin_mode: bool) -> s
 
 [요청 사항]
 - assessment의 계산 판정을 우선하고, 안정성 검토가 필요한 공정을 Cpk만으로 정상이라고 설명하지 마세요.
+- capability_criteria가 aiag_vda 모드이면 지수별 required와 status를 그대로 사용하세요. 단일 고정 기준으로 대체하거나 bootstrap 신뢰하한을 중복 적용하지 마세요. conditional은 소표본 조건부 충족이며 승인과 구분하고 hold는 판정 보류로 설명하세요.
 - Cp/Cpk는 전체 산포 기준이며 capability_status가 적용 가능일 때만 해석합니다. 적용 조건을 충족하지 못한 값을 추정하거나 Cwk로 대체하지 마세요.
 - Cw/Cwk는 군내 산포 진단용이고 Pp/Ppk와 예상 PPM은 정규모델 가정 참고값입니다. 비정규 의심 시 공식 능력 판정을 하지 마세요.
 - distribution_mode가 nonnormal이면 검증된 선택 분포와 capability_method(G/Z)를 설명하고 원자료 정규성 기각만으로 비정규 지수를 부정하지 마세요. Pearson은 T1만 적용하며 Cw/Cwk/Cpm/Cpmk는 미적용입니다.
@@ -570,6 +578,9 @@ def _compact_summary_for_prompt(full_summary: str, max_rows: int = 80) -> str:
         "변수", "N", "원본N", "분석N", "신뢰도 상태", "신뢰도 사유", "능력 적용 상태", "능력 적용 사유", "성능 해석 안내", "관리도", "적용 분포", "능력 계산법", "기준분포 상태", "성능분포 상태", "Cpk", "Ppk", "Cw", "Cwk", "군내/전체 지수 비율(Cwk/Ppk)", "Cpm", "Cpmk",
         "규격이탈", "X관리이탈", "R관리이탈", "최근규격이탈", "최근관리이탈",
         "운영모드", "한계기준", "기준구간상태", "기준구간사유", "능력기준", "비고",
+        "평가 기준 방식", "특성 중요도", "평가 단계", "평가 신뢰수준", "조사 결론",
+        "Cp 요구값", "Cpk 요구값", "Pp 요구값", "Ppk 요구값",
+        "Cp 기준 판정", "Cpk 기준 판정", "Pp 기준 판정", "Ppk 기준 판정",
     ]
 
     def risk_key(row: dict[str, Any]) -> tuple[int, float]:
@@ -616,6 +627,10 @@ def _fallback_chat_response(query: str, full_summary: str, reason: str = "") -> 
             "capability_status": str(row.get("능력 적용 상태", "") or ""),
             "capability_reason": str(row.get("능력 적용 사유", "") or ""),
             "note": str(row.get("비고", "") or "").strip(),
+            "auto": row.get('평가 기준 방식') == 'aiag_vda',
+            "cpk_target": _numeric_from_summary(row.get('Cpk 요구값')),
+            "cpk_decision": row.get('Cpk 기준 판정'),
+            "criteria_conclusion": str(row.get('조사 결론', '') or ''),
         })
 
     cpk_items = [x for x in enriched if np.isfinite(x["cpk"])]
@@ -626,6 +641,10 @@ def _fallback_chat_response(query: str, full_summary: str, reason: str = "") -> 
     warning = warning if np.isfinite(warning) else 1.
     bad = [x for x in cpk_items if x["cpk"] < warning]
     warn = [x for x in cpk_items if warning <= x["cpk"] < required]
+    automatic = any(x['auto'] for x in enriched)
+    if automatic:
+        bad = [x for x in cpk_items if x['cpk_decision'] == 'below']
+        warn = [x for x in cpk_items if not x['auto'] and warning <= x['cpk'] < required]
     spec_bad = [x for x in enriched if x["spec"] > 0]
     ctrl_bad = [x for x in enriched if x["ctrl"] > 0]
 
@@ -638,6 +657,11 @@ def _fallback_chat_response(query: str, full_summary: str, reason: str = "") -> 
         f"- 규격 이탈 발생: {len(spec_bad)}개",
         f"- 관리한계 이탈 발생: {len(ctrl_bad)}개",
     ]
+    if automatic:
+        lines[3:5] = [f'- Cpk 항목별 기준 미달: {len(bad)}개',
+                      f"- Cpk 소표본 조건부 충족: {sum(x['cpk_decision']=='conditional' for x in enriched)}개"]
+        lines.append('자동 평가는 지수별 요구값과 계산된 판정을 따릅니다. 조건부 충족은 승인과 구분합니다.')
+        lines.extend(f"- {x['name']}: {x['criteria_conclusion']}" for x in enriched if x['auto'])
 
     if worst:
         lines.append("")

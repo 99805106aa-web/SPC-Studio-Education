@@ -508,12 +508,16 @@ def _chart_mode_label(mode) -> str:
     return {
         "phase1": "해석용 관리도",
         "phase2": "관리용 관리도",
+        EXTENDED_MODE: "확장 슈하르트 관리도",
     }.get(str(mode or "").strip(), str(mode or ""))
 
 
 def _save_config():
     if education_mode():
         return
+    startup_chart_mode = st.session_state.get("chart_usage_mode", "phase1")
+    if startup_chart_mode == EXTENDED_MODE:
+        startup_chart_mode = st.session_state.get("_standard_chart_usage_mode", "phase1")
     # SMTP 비밀번호는 저장하지 않는다. AI API 키는 사용자가 한 번 입력하면 재사용되도록 저장한다.
     cfg = {
         "n": st.session_state.get("n", 5),
@@ -522,7 +526,7 @@ def _save_config():
         "subgroup_columns": st.session_state.get("subgroup_columns", []),
         "subgroup_var_name": st.session_state.get("subgroup_var_name", "측정치"),
         "measurement_date_column": st.session_state.get("measurement_date_column", ""),
-        "chart_usage_mode": st.session_state.get("chart_usage_mode", "phase1"),
+        "chart_usage_mode": startup_chart_mode,
         "baseline_subgroups": st.session_state.get("baseline_subgroups", 25),
         "hist_bins": st.session_state.get("hist_bins", 30),
         "palette": st.session_state.get("palette", "trust"),
@@ -764,6 +768,18 @@ def _render_preflight_check(preview: dict):
         st.session_state.get("data_layout_mode") != "wide_subgroup_cols"
         or len(st.session_state.get("subgroup_columns", [])) >= 2
     )
+    if st.session_state.get('beginner_mode'):
+        if data_ok:
+            st.caption(f"측정 데이터 {preview.get('rows', 0):,}행 · 규격 {'선택됨' if spec_ok else '없음 (관리도만 확인)'}")
+        if not settings_ok:
+            st.warning('한 행에 함께 측정한 값이 들어 있는 열을 2개 이상 선택하세요.')
+        if preview.get('unmatched_specs'):
+            st.warning('데이터와 연결되지 않은 규격 항목: ' + ', '.join(preview['unmatched_specs'][:8]))
+        if preview.get('missing_spec_cols'):
+            st.caption('규격이 없는 항목은 공정능력 지수가 표시되지 않습니다.')
+        for message in preview.get('messages', [])[:3]:
+            st.caption(str(message))
+        return
     steps = [
         ("1. 데이터 업로드", data_ok),
         ("2. 규격 확인", spec_ok),
@@ -847,6 +863,10 @@ def _render_first_look(results: list):
     if risky:
         names = ", ".join(str(it.get("column")) for it in risky[:6])
         st.warning(f"신뢰도 검토가 필요한 변수: {names}" + (" ..." if len(risky) > 6 else ""))
+    distribution_review = [str(it['column']) for it in results if it.get('distribution_warning')]
+    if distribution_review:
+        names = ', '.join(distribution_review[:6]) + (' …' if len(distribution_review) > 6 else '')
+        st.warning(f'분포 검토 안내가 있는 변수: {names}. 항목별 경고와 현재 모형의 결과를 확인하세요.')
 
 
 def _render_process_info_summary(meta: dict | None):
@@ -881,9 +901,14 @@ SUMMARY_HIDDEN_COLUMNS = {
 
 def _summary_visible_df(df):
     """선별요약 화면에서는 상세 추적용 컬럼을 숨긴다."""
-    if df is None or df.empty:
+    if df is None:
         return df
     df = df.copy()
+    # Arrow metadata is parsed as strict JSON in the browser; analysis attrs may contain NaN.
+    # Strip metadata only from the display copy, preserving the original for exports.
+    df.attrs.clear()
+    if df.empty:
+        return df
     if "신뢰도 상태" in df.columns or "신뢰도 사유" in df.columns:
         status = df.get("신뢰도 상태", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str.strip()
         reason = df.get("신뢰도 사유", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str.strip()
@@ -898,23 +923,51 @@ def _summary_visible_df(df):
             df.insert(insert_at, "신뢰도", combined)
     if "군내/전체 지수 비율(Cwk/Ppk)" in df.columns:
         df = df.rename(columns={"군내/전체 지수 비율(Cwk/Ppk)": "군내/전체 지수 비율"})
+    from spc_normality import shape_summary_display
+    df = shape_summary_display(df)
     drop_cols = [c for c in SUMMARY_HIDDEN_COLUMNS if c in df.columns]
     return df.drop(columns=drop_cols) if drop_cols else df
 
+
+SUMMARY_VIEWS = {
+    '핵심 요약': ['변수', '평가 상태', 'N', '폭 지수', '치우침 반영 지수', '규격이탈', '관리이탈'],
+    '능력 지표': ['변수', '판정', 'Cp', 'Cpk', 'Cw', 'Cwk', 'Pp', 'Ppk', 'Cpm', 'Cpmk'],
+    '통계·정규성': ['변수', '평균', 'σ(전체)', 'σ(군내)', '정규성 검정법', '정규성 p값', '정규성 판정'],
+    '전체 정보': None,
+}
+
+
+def _summary_view_df(df, view):
+    """Project screen columns without altering analysis values or row positions."""
+    columns = SUMMARY_VIEWS[view]
+    if columns is None:
+        leading = [col for col in ('변수', '평가 상태', '판정') if col in df.columns]
+        columns = leading + [col for col in df.columns if col not in leading]
+    return df.loc[:, [col for col in columns if col in df.columns]].copy()
+
 import streamlit as st
-from spc_policy import limits as _assessment_limits
+from spc_policy import limits as _assessment_limits, band as _assessment_band
 
 
-def _required_limit():
-    return _assessment_limits({'assessment_settings': st.session_state.get('assessment_settings', {})})[1]
+def _required_limit(it=None, metric='cpk'):
+    return _assessment_limits(it if it is not None else {'assessment_settings': st.session_state.get('assessment_settings', {})}, metric)[1]
 
 
-def _warning_limit():
-    return _assessment_limits({'assessment_settings': st.session_state.get('assessment_settings', {})})[0]
+def _warning_limit(it=None, metric='cpk'):
+    return _assessment_limits(it if it is not None else {'assessment_settings': st.session_state.get('assessment_settings', {})}, metric)[0]
+
+
+def _item_band(it, metric='cpk'):
+    return _assessment_band(it.get(metric), it, metric)
 
 
 def _threshold_text(text):
     from spc_policy import format_criteria
+    if st.session_state.get('assessment_settings', {}).get('criteria_mode') == 'aiag_vda':
+        if '초보자 모드 활성화' in text:
+            return '🔰 **초보자 모드** · AIAG·VDA 자동 평가: 표본 수에 따른 조정 목표값으로 비교합니다. 공정 상태 경고와 계산 조건은 별도로 확인하세요.'
+        return re.sub(r'1\.00\s*[~–-]\s*1\.33', '항목별 기준 구간',
+                      re.sub(r'1\.33|1\.00', '항목별 기준', text))
     return format_criteria(text, _warning_limit(), _required_limit())
 import matplotlib.pyplot as plt
 from scipy import stats
@@ -946,8 +999,12 @@ from spc_core import (
     load_data_df,
     load_spec_df,
     fmt_value,
+    mean_confidence_interval,
+    screening_index_pair,
+    screening_index_band,
 )
 from spc_charts import (
+    build_extended_figure,
     build_interactive_control_chart,
     build_control_chart,
     build_histogram,
@@ -957,15 +1014,23 @@ from spc_charts import (
     stability_assessment,
     build_overview_2x2,
     build_correlation_heatmap,
+    correlation_matrix,
     build_scatter_matrix,
     PALETTES,
 )
 from spc_fast import BoundedCache, cached_analysis, cached_frame, analysis_key, ui_analysis
-from spc_mode_ui import preserve_settings, beginner_inputs, applied_conditions, quick_results, paged_window
-from spc_metric_ui import process_metric_cards_html
+from spc_mode_ui import (preserve_settings, beginner_inputs, beginner_conditions, measurement_column_picker,
+                         quick_results, paged_window, show_scrollable_interactive_chart)
+from spc_metric_ui import process_metric_cards_html, STATUS_CELL_STYLES
 from spc_distribution_ui import render_distribution_panel
+from spc_extended_ui import render_extended, with_extended_results
+from spc_extended import EXTENDED_MODE, TITLE as EXTENDED_TITLE
+from spc_chart_guide import chart_selection_error, chart_selection_label, render_chart_guide, render_studio_header
+from spc_education import render_ocap_exercise, render_samples
 
-from spc_export import export_summary_excel, export_all_pdf, export_analysis_html, html_bytes_to_pdf, fig_to_bytes
+from spc_export import (
+    export_summary_excel, export_all_pdf, export_analysis_html, publish_analysis_html, html_bytes_to_pdf, fig_to_bytes,
+)
 
 _OUTLIER_METHOD_HELP = (
     "IQR\n"
@@ -1047,12 +1112,13 @@ import datetime
 
 # ─────────────────────────── 페이지 설정 ───────────────────────────
 st.set_page_config(
-    page_title="SPC Studio · 계량형",
+    page_title="AIAG - VDA SPC Studio",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+st.sidebar.caption(f"SPC Studio · 계산 버전 {CALCULATION_VERSION}")
 render_access_gate()
 
 # ─────────────────────────── CSS 커스텀 ───────────────────────────
@@ -1060,6 +1126,7 @@ st.markdown("""
 <style>
 /* 전체 폰트 */
 html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-serif; }
+[data-testid="stCaptionContainer"] { color:var(--text-color,#475569); opacity:1; font-size:0.85rem; line-height:1.5; }
 
 /* 헤더 */
 .main-header {
@@ -1070,18 +1137,18 @@ html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-
     margin-bottom: 1.2rem;
 }
 .main-header h1 { margin: 0; font-size: 1.6rem; }
-.main-header p  { margin: 0.2rem 0 0; font-size: 0.88rem; opacity: 0.85; }
 
 /* 메트릭 카드 */
 .metric-card {
     background: white;
+    color: #0f172a;
     border: 1px solid #e2e8f0;
     border-radius: 0.5rem;
     padding: 0.7rem 1rem;
     text-align: center;
     box-shadow: 0 1px 3px rgba(0,0,0,0.07);
 }
-.metric-label { font-size: 0.78rem; color: #64748b; margin-bottom: 0.2rem; }
+.metric-label { font-size: 0.85rem; color: #475569; margin-bottom: 0.2rem; }
 .metric-value { font-size: 1.15rem; font-weight: 700; }
 .first-look-grid {
     display: grid;
@@ -1178,8 +1245,8 @@ html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-
     transition: all 0.16s ease;
 }
 .stats-kpi-label {
-    font-size: 0.74rem;
-    color: #64748b;
+    font-size: 0.84rem;
+    color: #475569;
     margin-bottom: 0.16rem;
 }
 .stats-kpi-value {
@@ -1195,8 +1262,9 @@ html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-
 .stats-kpi-value.bad { color: #991b1b; }
 .stats-kpi-value.muted { color: #334155; }
 .stats-kpi-sub {
-    font-size: 0.70rem;
-    color: #94a3b8;
+    font-size: 0.81rem;
+    color: #475569;
+    line-height: 1.5;
     margin-top: 0.14rem;
 }
 .stats-kpi-good {
@@ -1216,6 +1284,7 @@ html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-
     background: linear-gradient(180deg, rgba(100,116,139,0.12) 0%, rgba(248,250,252,0.96) 100%);
 }
 .stats-block {
+    color: #0f172a;
     border: 1px solid #dbe5ef;
     border-radius: 0.55rem;
     padding: 0.55rem 0.7rem;
@@ -1314,6 +1383,20 @@ html, body, [class*="css"] { font-family: "Malgun Gothic", "Nanum Gothic", sans-
 
 /* 사이드바 */
 section[data-testid="stSidebar"] > div:first-child { padding-top: 1rem; }
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+    padding-top: 0.75rem;
+    padding-bottom: 1rem;
+}
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+    gap: 0.65rem;
+}
+/* Tighten section separators while keeping controls inside open panels spaced. */
+section[data-testid="stSidebar"] hr {
+    margin: 0.4rem 0;
+}
+section[data-testid="stSidebar"] [data-testid="stExpanderDetails"] [data-testid="stVerticalBlock"] {
+    gap: 1rem;
+}
 
 /* 비밀번호 표시/숨김 토글 버튼 제거 */
 button[data-testid="stTextInputVisibilityToggle"],
@@ -1345,6 +1428,12 @@ def _init_state():
     saved = _load_config()
     em = saved.get("email", {})
     saved_process_info = _normalize_process_info(saved.get("process_info", {}))
+    startup_chart_mode = "phase2" if saved.get("chart_usage_mode") == "phase2" else "phase1"
+    if (st.session_state.get('chart_usage_mode') == EXTENDED_MODE
+            and '_standard_chart_usage_mode' not in st.session_state
+            and st.session_state.get('selected_control_chart') != EXTENDED_MODE
+            and not st.session_state.get('analysis_done')):
+        st.session_state['chart_usage_mode'] = startup_chart_mode
     defaults = {
         'results': [],
         'summary_df': None,
@@ -1362,11 +1451,14 @@ def _init_state():
         'data_layout_mode': saved.get('data_layout_mode', 'long'),
         'selected_columns': saved.get('selected_columns'),
         'subgroup_columns': saved.get('subgroup_columns', []),
-        'distribution_settings': saved.get('distribution_settings', {}),
+        # A new browser session starts with the normal model. Presets and the
+        # distribution panel can still apply a model explicitly in this session.
+        'distribution_settings': {},
         'assessment_settings': saved.get('assessment_settings', {}),
         'subgroup_var_name': saved.get('subgroup_var_name', '측정치'),
         'measurement_date_column': saved.get('measurement_date_column', ''),
-        'chart_usage_mode': saved.get('chart_usage_mode', 'phase1'),
+        'chart_usage_mode': startup_chart_mode,
+        '_standard_chart_usage_mode': startup_chart_mode,
         'baseline_subgroups': saved.get('baseline_subgroups', 25),
         'palette': saved.get('palette', 'trust'),
         'hist_bins': saved.get('hist_bins', 30),
@@ -1418,7 +1510,7 @@ def _init_state():
         # 데이터 전처리 및 변환 옵션
         'preprocess_outliers': saved.get('preprocess_outliers', False),
         'outlier_method': saved.get('outlier_method', 'iqr') if saved.get('outlier_method') in ('iqr', 'quantile') else 'iqr',
-        'box_cox_transform': saved.get('box_cox_transform', False),
+        'box_cox_transform': False,
         # AI 결과 캐시(세션 전용)
         'ai_var_cache': {},
         'chat_history': [],
@@ -1430,6 +1522,14 @@ def _init_state():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+    if not st.session_state.get('_normal_start_initialized'):
+        # Refresh sessions that were already open when this startup behavior changed.
+        had_nondefault_model = bool(st.session_state['distribution_settings'] or st.session_state['box_cox_transform'])
+        st.session_state['distribution_settings'] = {}
+        st.session_state['box_cox_transform'] = False
+        if had_nondefault_model and st.session_state.get('data_bytes') and st.session_state.get('analysis_done'):
+            st.session_state['_refresh_normal_start'] = True
+        st.session_state['_normal_start_initialized'] = True
     for key, label in PROCESS_INFO_FIELDS:
         state_key = f"process_info_{key}"
         if state_key not in st.session_state:
@@ -1438,6 +1538,12 @@ def _init_state():
 _init_state()
 
 preserve_settings()
+if st.session_state.get("_spc_analysis_kind") == "attribute":
+    from spc_attribute_ui import render_attribute_studio
+
+    render_attribute_studio()
+    st.stop()
+
 if '_bounded_cache' not in st.session_state:
     st.session_state['_bounded_cache'] = BoundedCache()
 
@@ -1538,7 +1644,7 @@ def _file_watcher():
             st.session_state['spec_file_name'] = ''
         st.session_state['_loaded_fav_name'] = fav.get('name', '')
         st.session_state.pop('_input_identity', None)
-        st.session_state['_trigger_analysis'] = True
+        st.session_state['_watch_file_changed'] = True
         st.session_state['_watch_last_status'] = '변경 감지'
         _save_config()
         st.rerun()
@@ -1587,6 +1693,11 @@ def _run_all_favorites() -> list:
     return all_results
 
 
+def _requires_capability_review(item):
+    return bool(item.get('distribution_warning') or
+                (item.get('capability_status') and item['capability_status'] != '적용 가능'))
+
+
 def _build_all_favs_email(all_results: list) -> tuple[str, str]:
     """모든 즐겨찾기 분석 결과로 통합 이메일 본문 생성."""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1600,17 +1711,17 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
     detail_lines = []
 
     for fav_name, results in all_results:
-        bad  = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit()]
-        warn = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit()]
+        bad  = [it for it in results if not _requires_capability_review(it) and _item_band(it) == 'bad']
+        warn = [it for it in results if not _requires_capability_review(it) and _item_band(it) == 'warn']
         svio = sum(it.get('spec_violation_count', 0) for it in results)
         cvio = sum(_get_ctrl_total(it) for it in results)
         total_bad  += len(bad)
         total_warn += len(warn)
         total_spec += svio
         total_ctrl += cvio
-        total_review += sum(it.get('capability_status') != '적용 가능' for it in results)
+        total_review += sum(_requires_capability_review(it) for it in results)
 
-        needs_review = [it for it in results if assess_process(it)['level'] != 'low']
+        needs_review = [it for it in results if _requires_capability_review(it) or assess_process(it)['level'] != 'low']
         if not needs_review:
             detail_lines.append(f"\n▷ [{fav_name}] — 이상 없음 ✓")
             continue
@@ -1630,6 +1741,8 @@ def _build_all_favs_email(all_results: list) -> tuple[str, str]:
                                     f"{fmt_value(it['ppk']):>7} {ppm_w:>12} {sv:>8}")
                 detail_lines.append(f"    판정: {assess_process(it)['text']}")
                 detail_lines.append("    Cp·Cpk: " + it.get('capability_status', '재분석 필요') + " · " + "; ".join(it.get('capability_reasons', [])))
+                if it.get('distribution_warning'):
+                    detail_lines.append('    분포 검토: ' + it['distribution_warning'])
                 detail_lines.append("    Pp·Ppk/예상 PPM은 선택 분포의 모형 참고값입니다.")
                 detail_lines.append(f"    계산법: {it.get('capability_method', 'normal')} / 분포: {(it.get('distribution_model') or {}).get('name', '정규')}")
 
@@ -1665,9 +1778,10 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
         sv  = it.get('recent_spec_violation', 0) if only_recent else it.get('spec_violation_count', 0)
         cv  = (it.get('recent_ctrl_violation', 0) if only_recent
                else _get_ctrl_total(it))
-        if np.isfinite(cpk) and cpk < _warning_limit():
+        band = 'na' if _requires_capability_review(it) else _item_band(it)
+        if band == 'bad':
             bad.append(it)
-        elif np.isfinite(cpk) and cpk < _required_limit():
+        elif band == 'warn':
             warn.append(it)
         if sv > 0:
             spec_vio.append((col, sv))
@@ -1677,7 +1791,7 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
     rule_items = [it for it in results if (
         any(len(it['means']) - 1 in indices for indices in it.get('ksq_idx', {}).values())
         if only_recent else any(it.get('ksq_counts', {}).values()))]
-    review_items = [it for it in results if it.get('capability_status') and it.get('capability_status') != '적용 가능']
+    review_items = [it for it in results if _requires_capability_review(it)]
     if not bad and not warn and not spec_vio and not ctrl_vio and not rule_items and not review_items:
         return None, None
 
@@ -1696,6 +1810,8 @@ def _build_detail_email(results: list, only_recent: bool, source_name: str = "")
         lines.append(f"  {item['column']}: {assess_process(item)['text']}")
         if item.get('capability_status') != '적용 가능':
             lines.append("    Cp·Cpk: " + item.get('capability_status', '재분석 필요') + " — " + "; ".join(item.get('capability_reasons', [])))
+        if item.get('distribution_warning'):
+            lines.append('    분포 검토: ' + item['distribution_warning'])
     lines.append("  Pp·Ppk/예상 PPM은 선택 분포 모형의 참고값이며, 정규식 Cw·Cwk는 군내 진단용입니다.")
     for item in results:
         if item.get('distribution_mode') == 'nonnormal':
@@ -1774,8 +1890,8 @@ def _push_analysis_history(results: list, source: str = ""):
         'time': datetime.datetime.now().strftime("%m-%d %H:%M"),
         'source': source or st.session_state.get('_loaded_fav_name', ''),
         'n_vars': len(results),
-        'n_bad':  sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit()),
-        'n_warn': sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit()),
+        'n_bad':  sum(1 for it in results if _item_band(it) == 'bad'),
+        'n_warn': sum(1 for it in results if _item_band(it) == 'warn'),
         'n_spec': sum(it.get('spec_violation_count', 0) for it in results),
         'cpk_list': {it['column']: it.get('cpk', float('nan')) for it in results},
     }
@@ -1827,7 +1943,7 @@ def _auto_select_corr_columns(results: list, num_cols: list, limit: int = 10) ->
         spec_cnt = int(it.get("spec_violation_count", 0) or 0)
         ctrl_cnt = _get_ctrl_total(it)
         is_risky = (
-            (np.isfinite(cpk_val) and cpk_val < _required_limit())
+            (_item_band(it) in ('bad', 'warn'))
             or spec_cnt > 0
             or ctrl_cnt > 0
         )
@@ -1837,13 +1953,13 @@ def _auto_select_corr_columns(results: list, num_cols: list, limit: int = 10) ->
             "cpk": cpk_val,
             "spec": spec_cnt,
             "ctrl": ctrl_cnt,
-            "risky": is_risky,
+            "risky": is_risky, "band": _item_band(it),
             "order": order,
         })
 
     risky = [x for x in candidates if x["risky"]]
     risky.sort(key=lambda x: (
-        0 if np.isfinite(x["cpk"]) and x["cpk"] < _warning_limit() else 1,
+        0 if x["band"] == "bad" else 1,
         x["cpk"],
         -(x["spec"] + x["ctrl"]),
         x["order"],
@@ -1960,9 +2076,9 @@ def _render_ai_interpretation(ai_res: dict, assessment=None):
     
     # ── 1. 위험 등급별 하이라이트 박스 설정 ──
     risk_config = {
-        'high': ('🔴 HIGH (고위험)', '#fef2f2', '#dc2626'),
-        'medium': ('🟡 MEDIUM (주의)', '#fffbeb', '#d97706'),
-        'low': ('🟢 LOW (정상)', '#f0fdf4', '#16a34a')
+        'high': ('🔴 HIGH (고위험)', '#fef2f2', '#991b1b'),
+        'medium': ('🟡 MEDIUM (주의)', '#fffbeb', '#92400e'),
+        'low': ('🟢 LOW (정상)', '#f0fdf4', '#166534')
     }
     badge, bg_color, border_color = risk_config.get(risk, ('⬜ UNKNOWN', '#f8fafc', '#64748b'))
     
@@ -1987,7 +2103,7 @@ def _render_ai_interpretation(ai_res: dict, assessment=None):
         
         # 표 내부의 특정 키워드(Cpk, 이탈 등) 하이라이트 스타일 함수
         def _style_evidence(row):
-            return ['background-color: rgba(251,191,36,0.15); font-weight:bold' if risk != 'low' else '' for _ in row]
+            return [STATUS_CELL_STYLES['warn'] if risk != 'low' else '' for _ in row]
             
         try:
             st.dataframe(df_ev.style.apply(_style_evidence, axis=1), use_container_width=True, hide_index=True)
@@ -2122,10 +2238,15 @@ def _lbl(expert: str, beginner: str) -> str:
     return beginner if st.session_state.get('beginner_mode') else expert
 
 
-def _fig_to_st(fig):
+def _fig_to_st(fig, *, vector=False):
     """Figure를 Streamlit에 표시하고 닫기."""
-    st.pyplot(fig)
-    plt.close(fig)
+    try:
+        if vector:
+            st.image(_figure_to_svg(fig), width='stretch')
+        else:
+            st.pyplot(fig)
+    finally:
+        plt.close(fig)
 
 
 def _render_date_label_status(it):
@@ -2141,7 +2262,7 @@ def _render_date_label_status(it):
         )
 
 
-_CONTROL_SCROLL_THRESHOLD = 100
+_CONTROL_SCROLL_THRESHOLD = 50
 # 군이 많을 때 가로 스크롤 차트의 화면 폭(px/inch). 그림 자체는 SVG라 배율과 무관하게 선명하다.
 _CONTROL_SCROLL_PX_PER_INCH = 150
 
@@ -2196,14 +2317,14 @@ def _show_control_chart_figure(fig, *, scroll_css_width: int | None = None) -> N
     plt.close(fig)
     scroll = "" if scroll_css_width is None else "overflow-x:auto;overflow-y:hidden;"
     html = f"""
-    <div style="margin:0;{scroll}">
+    <div role="region" aria-label="관리도 가로 스크롤" tabindex="0" style="margin:0;max-width:100%;{scroll}">
       {svg}
     </div>
     <script>
     function fitChart() {{
       var svg = document.querySelector('svg');
       if (!svg || !window.frameElement) return;
-      var height = Math.ceil(svg.getBoundingClientRect().height) + 4;
+      var height = Math.ceil(svg.parentElement.getBoundingClientRect().height) + 8;
       var frame = window.frameElement;
       frame.style.height = height + 'px';
       if (frame.parentElement) frame.parentElement.style.height = height + 'px';
@@ -2218,40 +2339,461 @@ def _show_control_chart_figure(fig, *, scroll_css_width: int | None = None) -> N
 def _render_control_chart_scrollable(it, palette, ksq_toggles, show_zones, display_mode: str = "compact", view_key="main"):
     """군 개수가 많은 관리도는 넓은 차트를 가로 스크롤 컨테이너로 표시."""
     it, _signals = paged_window(it, view_key)
-    interactive = st.toggle("확대·측정점 확인", value=False, key=f"interactive_control_chart_{view_key}")
-    if interactive:
-        st.caption("드래그: 구간 확대 · 두 번 클릭: 전체 보기 · 점에 마우스: 측정값·관리한계·위반 규칙 확인. 빨간 원은 관리한계 이탈, 주황 마름모는 패턴 규칙 위반입니다.")
-        st.plotly_chart(build_interactive_control_chart(it, palette, ksq_toggles), width='stretch', height=760,
-                        theme=None, key=f"chart_{view_key}",
-                        config={"displaylogo": False, "scrollZoom": True, "doubleClick": "reset",
-                                "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-                                "toImageButtonOptions": {"filename": "SPC_control_chart", "scale": 2}})
-        return
-    compact = str(display_mode).lower() == "compact"
     group_count = _control_group_count(it)
-    if group_count < _CONTROL_SCROLL_THRESHOLD:
-        fig = build_control_chart(
-            it,
-            palette=palette,
-            ksq_toggles=ksq_toggles,
-            show_zones=show_zones,
-            display_mode=display_mode,
-        )
-        _show_control_chart_figure(fig)
-        return
+    scroll_column, presentation_column = st.columns(2)
+    presentation = presentation_column.toggle("관리도 한 화면에 맞춤", key=f"presentation_control_chart_{view_key}",
+                                              help="그래프 높이를 줄여 위치 관리도와 산포 관리도를 한 화면에서 함께 볼 수 있게 합니다.")
+    scroll_enabled = scroll_column.toggle("관리도 가로 스크롤", value=group_count > _CONTROL_SCROLL_THRESHOLD,
+                                          key=f"scroll_control_chart_{view_key}", disabled=presentation,
+                                          help="측정점 간격을 넓혀 표시합니다. 관리도 아래 가로 스크롤 막대로 구간을 이동하세요. 끄면 전체 구간을 화면 폭에 맞춥니다.")
+    scroll_enabled = scroll_enabled and not presentation
+    width_in = min(max(12.0, group_count * 0.20), 200.0)
+    scroll_width = int(width_in * _CONTROL_SCROLL_PX_PER_INCH)
+    if scroll_enabled:
+        st.caption(f"관리도 아래 가로 스크롤 막대로 좌우 이동하세요. 현재 표시: {group_count:,}점 · 전체 보기: ‘관리도 가로 스크롤’ 끄기")
+    fig = build_interactive_control_chart(it, palette, ksq_toggles, show_zones=show_zones)
+    config = {"displaylogo": False, "scrollZoom": False, "doubleClick": "reset"}
+    show_scrollable_interactive_chart(fig, scroll_width if scroll_enabled else None, config, presentation=presentation)
+    if it.get('dispersion_limit_method'):
+        st.caption(it['dispersion_limit_method'])
+    if it.get('mr_gap_count'):
+        st.caption(f"결측·제외로 순서가 끊긴 구간 {it['mr_gap_count']:,}개는 이동범위 계산에서 제외했습니다.")
+    if it.get('control_phase') == 'phase2' and it.get('distribution_mode') != 'nonnormal':
+        st.caption('연속 규칙은 조건이 완성된 시점에 표시합니다.')
+    return it
 
-    width_in = min(max(12.0, group_count * 0.24), 36.0)
-    height_in = 6.2 if compact else 7.0
-    fig = build_control_chart(
-        it,
-        palette=palette,
-        figsize=(width_in, height_in),
-        ksq_toggles=ksq_toggles,
-        show_zones=show_zones,
-        display_mode=display_mode,
+
+class _ResultPanel:
+    def __init__(self, opened):
+        self.open = opened
+        self.container = st.container()
+
+    def __enter__(self):
+        return self.container.__enter__()
+
+    def __exit__(self, *args):
+        return self.container.__exit__(*args)
+
+
+def _result_tabs(labels):
+    """Use a normal input event for reliable result navigation and reruns."""
+    if st.session_state.get('advanced_tabs') not in labels:
+        st.session_state['advanced_tabs'] = labels[0]
+    st.markdown('''<style>
+    .st-key-advanced_tabs div[role="radiogroup"] {
+      flex-wrap:nowrap; overflow-x:auto; gap:12px; border-bottom:1px solid #d8e1eb;
+    }
+    .st-key-advanced_tabs label[data-baseweb="radio"] {
+      flex:0 0 auto; margin:0; padding:7px 1px; border-bottom:2px solid transparent;
+    }
+    .st-key-advanced_tabs label[data-baseweb="radio"] > div:first-child {display:none;}
+    .st-key-advanced_tabs label:has(input:checked) {border-bottom-color:#ff4b4b;color:#ff4b4b;}
+    .st-key-advanced_tabs label:hover {color:#ff4b4b;}
+    </style>''', unsafe_allow_html=True)
+    selected = st.radio('결과 보기', labels, horizontal=True, key='advanced_tabs', label_visibility='collapsed')
+    return tuple(_ResultPanel(label == selected) for label in labels)
+
+
+def _select_detail_item(results):
+    nav_c1, nav_c2, nav_c3 = st.columns([1, 6, 1])
+    n_cols = len(results)
+    col_names = [x['column'] for x in results]
+    _vi = st.session_state.get('detail_var_idx', 0)
+    if not isinstance(_vi, int):
+        _vi = 0
+    _vi = max(0, min(_vi, n_cols - 1))
+    _sel = st.session_state.get('detail_var_sel', _vi)
+    if not isinstance(_sel, int):
+        _sel = _vi
+    _sel = max(0, min(_sel, n_cols - 1))
+    st.session_state['detail_var_idx'] = _vi
+    st.session_state['detail_var_sel'] = _sel
+    with nav_c1:
+        if st.button("◀ 이전", use_container_width=True, disabled=(_vi == 0)):
+            _new = _vi - 1
+            st.session_state['detail_var_idx'] = _new
+            st.session_state['detail_var_sel'] = _new
+            st.rerun()
+    with nav_c3:
+        if st.button("다음 ▶", use_container_width=True, disabled=(_vi == n_cols - 1)):
+            _new = _vi + 1
+            st.session_state['detail_var_idx'] = _new
+            st.session_state['detail_var_sel'] = _new
+            st.rerun()
+    with nav_c2:
+        sel_var = st.selectbox("변수 선택", options=range(n_cols),
+                               index=_sel, format_func=lambda i: str(col_names[i]),
+                               key="detail_var_sel", label_visibility="collapsed")
+        if not isinstance(sel_var, int):
+            sel_var = _sel
+        sel_var = max(0, min(sel_var, n_cols - 1))
+        if sel_var != _vi:
+            st.session_state['detail_var_idx'] = sel_var
+            _vi = sel_var
+
+    if not results or _vi < 0 or _vi >= len(results):
+        st.warning("표시할 분석 결과가 없습니다. 분석을 다시 실행해 주세요.")
+        st.stop()
+
+    it = results[_vi]
+    return it, _vi
+
+
+def _render_distribution_detail(it, _vi, palette):
+    distribution_range = st.radio("히스토그램 표시 범위", ["분포 확대", "규격 전체"], horizontal=True, key=f"distribution_range_{_vi}")
+    h_col, q_col = st.columns(2)
+    with h_col:
+        try:
+            fig_hist = build_histogram(it, palette=palette, bins=st.session_state['hist_bins'],
+                                       range_mode='data' if distribution_range == '분포 확대' else 'spec')
+            _fig_to_st(fig_hist, vector=True)
+            if st.button("🔍 확대", key=f"zoom_hist_{_vi}", use_container_width=True):
+                _show_chart_modal(it, "hist", range_mode="data" if distribution_range == "분포 확대" else "spec")
+        except Exception as e:
+            st.error(f"히스토그램 오류: {e}")
+    with q_col:
+        try:
+            fig_qq = build_qq_plot(it, palette=palette)
+            _fig_to_st(fig_qq, vector=True)
+            if st.button("🔍 확대", key=f"zoom_qq_{_vi}", use_container_width=True):
+                _show_chart_modal(it, "qq")
+        except Exception as e:
+            st.error(f"QQ 플롯 오류: {e}")
+
+
+def _render_statistics_detail(it):
+    ppm_w, ppm_o, ppm_e = it.get('ppm_within', np.nan), it['ppm_ppk'], it['emp_ppm']
+    _is_xmr = bool(it.get('is_xmr', False))
+    _x_lab = "X" if _is_xmr else "Xbar"
+    _disp_kind = str(it.get('dispersion_kind', "MR" if _is_xmr else "R"))
+    _disp_kind_label = {
+        "R": "R(범위)",
+        "S": "S(표준편차)",
+        "MR": "MR(이동범위)",
+    }.get(_disp_kind, _disp_kind)
+    _disp_lcl_applicable = not (_disp_kind == "R" and int(it.get('n', 0)) <= 6)
+    if it.get('distribution_mode') == 'nonnormal':
+        _disp_lcl_applicable = int(it.get('n', 0)) > 1
+    _ksq_c = it.get('ksq_counts', {})
+    _norm_msg = str(it.get('norm_msg', '정규성 검정 결과 없음'))
+    _n_valid = int(np.isfinite(np.asarray(it.get('series', []), dtype=float)).sum())
+    _series_vals = np.asarray(it.get('series', []), dtype=float)
+    _series_vals = _series_vals[np.isfinite(_series_vals)]
+    _std_v = np.nan
+    if len(_series_vals):
+        _min_v = float(np.min(_series_vals))
+        _max_v = float(np.max(_series_vals))
+        _avg_v = float(np.mean(_series_vals))
+        _rng_v = _max_v - _min_v
+    else:
+        _min_v = np.nan
+        _max_v = np.nan
+        _avg_v = np.nan
+        _rng_v = np.nan
+    if len(_series_vals) >= 2:
+        _std_v = float(np.std(_series_vals, ddof=1))
+    _ci95_lo, _ci95_hi = mean_confidence_interval(_avg_v, _std_v, len(_series_vals))
+
+    _med_v = np.nan
+    _q1_v = np.nan
+    _q3_v = np.nan
+    _iqr_v = np.nan
+    if len(_series_vals):
+        _med_v = float(np.median(_series_vals))
+        _q1_v = float(np.percentile(_series_vals, 25))
+        _q3_v = float(np.percentile(_series_vals, 75))
+        _iqr_v = _q3_v - _q1_v
+
+    _cv_pct = np.nan
+    if np.isfinite(_std_v) and np.isfinite(_avg_v) and _avg_v != 0:
+        _cv_pct = abs(_std_v / _avg_v) * 100.0
+
+    _target_v = float(it.get('target', np.nan))
+    _target_delta = np.nan
+    _target_delta_pct = np.nan
+    if np.isfinite(_avg_v) and np.isfinite(_target_v):
+        _target_delta = _avg_v - _target_v
+        if _target_v != 0:
+            _target_delta_pct = (_target_delta / _target_v) * 100.0
+
+    _usl_v = float(it.get('usl', np.nan))
+    _lsl_v = float(it.get('lsl', np.nan))
+    _margin_usl = np.nan
+    _margin_lsl = np.nan
+    _margin_min = np.nan
+    if np.isfinite(_usl_v) and np.isfinite(_avg_v):
+        _margin_usl = _usl_v - _avg_v
+    if np.isfinite(_lsl_v) and np.isfinite(_avg_v):
+        _margin_lsl = _avg_v - _lsl_v
+    _margin_cands = [v for v in (_margin_usl, _margin_lsl) if np.isfinite(v)]
+    if _margin_cands:
+        _margin_min = float(min(_margin_cands))
+
+    _skew_v = np.nan
+    _kurt_v = np.nan
+    if len(_series_vals) >= 3:
+        try:
+            _skew_v = float(stats.skew(_series_vals, nan_policy='omit', bias=False))
+        except Exception:
+            _skew_v = np.nan
+    if len(_series_vals) >= 4:
+        try:
+            _kurt_v = float(stats.kurtosis(_series_vals, nan_policy='omit', fisher=False, bias=False))
+        except Exception:
+            _kurt_v = np.nan
+
+    def _cap_ci_approx(v, n_obs: int):
+        try:
+            fv = float(v)
+        except Exception:
+            return np.nan, np.nan
+        if (not np.isfinite(fv)) or n_obs < 2:
+            return np.nan, np.nan
+        se = math.sqrt(max(0.0, (1.0 / (9.0 * n_obs)) + ((fv * fv) / (2.0 * max(1, n_obs - 1)))))
+        z = 1.96
+        return fv - z * se, fv + z * se
+
+    def _margin_level(v) -> str:
+        try:
+            fv = float(v)
+        except Exception:
+            return "muted"
+        if not np.isfinite(fv):
+            return "muted"
+        return "bad" if fv < 0 else "good"
+
+    def _num(v, d: int = 3) -> str:
+        try:
+            fv = float(v)
+        except Exception:
+            return "—"
+        return f"{fv:.{d}f}" if np.isfinite(fv) else "—"
+
+    def _ppm(v) -> str:
+        try:
+            fv = float(v)
+        except Exception:
+            return "—"
+        return f"{fv:,.0f}" if np.isfinite(fv) else "—"
+
+    def _cp_level(v, metric='cpk') -> str:
+        try:
+            fv = float(v)
+            if not np.isfinite(fv):
+                return "muted"
+            state = _assessment_band(fv, it, metric)
+            return 'muted' if state == 'na' else state
+        except Exception:
+            return "muted"
+
+    def _ppm_level(v) -> str:
+        try:
+            fv = float(v)
+        except Exception:
+            return "muted"
+        if not np.isfinite(fv):
+            return "muted"
+        if fv > 50000:
+            return "bad"
+        if fv > 10000:
+            return "warn"
+        return "good"
+
+    def _kv_block(title: str, rows, extra_class: str = "") -> str:
+        _rows_html = []
+        for _row in rows:
+            if len(_row) >= 3:
+                k, v, cls = _row[0], _row[1], str(_row[2] or "")
+            else:
+                k, v = _row[0], _row[1]
+                cls = ""
+            if cls in {"good", "warn", "bad", "muted"}:
+                v_html = f"<span class='stats-val stats-val-{cls}'>{v}</span>"
+            else:
+                v_html = str(v)
+            _rows_html.append(f"<tr><td>{k}</td><td>{v_html}</td></tr>")
+        _rows = "".join(_rows_html)
+        _block_class = "stats-block"
+        if str(extra_class).strip():
+            _block_class += f" {str(extra_class).strip()}"
+        return (
+            f"<div class='{_block_class}'>"
+            f"<div class='stats-title'>{title}</div>"
+            f"<table class='stats-kv'>{_rows}</table>"
+            f"</div>"
+        )
+
+    from spc_policy import REFERENCE_COMPARISON_LABEL, reference_only_decision
+
+    if it.get('distribution_warning'):
+        st.warning(it['distribution_warning'])
+    _pair = screening_index_pair(it)
+    st.caption(_pair['state'])
+    _selected_metrics = [key for key in (_pair['width_metric'], _pair['shifted_metric']) if key]
+    _modeled = it.get('distribution_mode') == 'nonnormal' or it.get('box_cox_applied')
+    _suffix = '.' + it.get('capability_method', 'G') if _modeled else ''
+    _selected_rows = []
+    _kpis = []
+    for _key in _selected_metrics:
+        _value = it.get(_key, np.nan)
+        _label = _key.capitalize() + _suffix
+        _decision = it.get('capability_criteria', {}).get('indices', {}).get(_key, {})
+        _sub = ('모형 기반' if _modeled else '전체산포 고려') if _num(_value) != '—' else '규격·계산 조건 확인'
+        if _num(_value) == '—' and _key in ('cp', 'pp') and any(
+                not np.isfinite(it.get(side, np.nan)) for side in ('usl', 'lsl')):
+            _sub = '양측 규격 필요'
+        if reference_only_decision(_decision):
+            _sub = REFERENCE_COMPARISON_LABEL
+        _cls = _cp_level(_value, _key)
+        if _key == _pair['shifted_metric']:
+            _state = screening_index_band(it)
+            _cls = 'muted' if _state == 'na' else _state
+        _kpis.append((_label, _num(_value), _sub, _cls))
+        _selected_rows.append((_label, _num(_value), _cls))
+
+    _within_label = 'MR 참고' if it.get('within_estimator') == 'moving_range' and not it.get('box_cox_applied') else '군내산포 고려'
+    _within_rows = []
+    for _key in ('cw', 'cwk'):
+        _value = _num(it.get(_key, np.nan))
+        _label = f'{_key.capitalize()} ({_within_label})'
+        _sub = '현재 모형에서 미적용' if _value == '—' and _modeled else '계산 조건 확인' if _value == '—' else ''
+        _kpis.append((_label, _value, _sub, 'muted'))
+        _within_rows.append((_label, _value, 'muted'))
+    _kpis.extend([
+        ("PPM(Overall)", _ppm(ppm_o), "100만개 기준", _ppm_level(ppm_o)),
+        ("유효 표본수", f"{_n_valid:,}", "결측 제외", "muted"),
+    ])
+    for _col, (_lbl, _val, _sub, _cls) in zip(st.columns(len(_kpis)), _kpis):
+        _col.markdown(
+            f"""
+            <div class="stats-kpi stats-kpi-{_cls}">
+                <div class="stats-kpi-label">{_lbl}</div>
+                <div class="stats-kpi-value {_cls}">{_val}</div>
+                <div class="stats-kpi-sub">{_sub}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    d1, d2, d3, d4 = st.columns([1.0, 1.0, 1.0, 1.22])
+    _spec_rows = [
+        ("USL (원단위)" if it.get('box_cox_applied') else "USL", _num(it.get('original_usl' if it.get('box_cox_applied') else 'usl', np.nan)), "muted"),
+        ("LSL (원단위)" if it.get('box_cox_applied') else "LSL", _num(it.get('original_lsl' if it.get('box_cox_applied') else 'lsl', np.nan)), "muted"),
+        ("목표치(T)", _num(it.get('target', np.nan)), "muted"),
+        ("운영 모드", str(it.get('control_phase_label', '해석용')), "muted"),
+        *_selected_rows,
+        *_within_rows,
+        ("Cpm (목표치 고려)", _num(it.get('cpm', np.nan)), _cp_level(it.get('cpm', np.nan), 'cpm')),
+        ("Cpmk (목표치·치우침 고려)", _num(it.get('cpmk', np.nan)), _cp_level(it.get('cpmk', np.nan), 'cpmk')),
+    ]
+    _spec_v = int(it.get('spec_violation_count', 0))
+    _x_v, _r_v = _get_ctrl_counts(it)
+    _ppm_rows = [
+        ("PPM(Within)", _ppm(ppm_w), _ppm_level(ppm_w)),
+        ("PPM(Overall)", _ppm(ppm_o), _ppm_level(ppm_o)),
+        ("PPM(실측)", _ppm(ppm_e), _ppm_level(ppm_e)),
+        ("규격 이탈", f"{_spec_v:,} 건", "bad" if _spec_v > 0 else "good"),
+        (f"{_x_lab} 이탈", f"{_x_v:,} 건", "bad" if _x_v > 0 else "good"),
+        (f"{_disp_kind_label} 이탈", f"{_r_v:,} 건", "bad" if _r_v > 0 else "good"),
+    ]
+    _ctrl_rows = [
+        ("한계 기준", str(it.get('limit_reference_label', '전체 데이터')), "muted"),
+        (f"{_x_lab}-CL", _num(it.get('xbarbar', np.nan)), "muted"),
+        (f"{_x_lab}-UCL", _num(it.get('ucl', np.nan)), "muted"),
+        (f"{_x_lab}-LCL", _num(it.get('lcl', np.nan)), "muted"),
+        (f"{_disp_kind_label}-CL", _num(it.get('r_bar', np.nan)), "muted"),
+        (f"{_disp_kind_label}-UCL", _num(it.get('r_ucl', np.nan)), "muted"),
+    ]
+    if _disp_lcl_applicable:
+        _ctrl_rows.append((f"{_disp_kind_label}-LCL", _num(it.get('r_lcl', np.nan)), "muted"))
+    _basic_rows_core = [
+        ("최소", _num(_min_v), "muted"),
+        ("최대", _num(_max_v), "muted"),
+        ("평균(μ)", _num(_avg_v), "muted"),
+        ("중앙값(Median)", _num(_med_v), "muted"),
+        ("Q1 / Q3", f"{_num(_q1_v)} / {_num(_q3_v)}", "muted"),
+        ("IQR(Q3-Q1)", _num(_iqr_v), "muted"),
+        ("범위", _num(_rng_v), "muted"),
+        ("95% CI 하한(μ)", _num(_ci95_lo), "muted"),
+        ("95% CI 상한(μ)", _num(_ci95_hi), "muted"),
+    ]
+    _aux_rows_var_target = [
+        ("변동계수 CV(%)", _num(_cv_pct, 2), "muted"),
+        ("목표치 편차(μ-T)", _num(_target_delta), "muted"),
+        ("편차율(%)", _num(_target_delta_pct, 2), "muted"),
+    ]
+    _aux_rows_margin = [
+        ("규격여유 USL-μ", _num(_margin_usl), _margin_level(_margin_usl)),
+        ("규격여유 μ-LSL", _num(_margin_lsl), _margin_level(_margin_lsl)),
+        ("최소 규격여유", _num(_margin_min), _margin_level(_margin_min)),
+    ]
+    _aux_rows_shape_ci = [
+        ("왜도", _num(abs(_skew_v)), "muted"),
+        ("첨도", _num(abs(_kurt_v)), "muted"),
+    ]
+    _ci_key = _pair['shifted_metric']
+    if _ci_key and not _modeled and '만족' in str(it.get('norm_msg', '')):
+        _ci_lo, _ci_hi = _cap_ci_approx(it.get(_ci_key, np.nan), len(_series_vals))
+        if np.isfinite([_ci_lo, _ci_hi]).all():
+            _aux_rows_shape_ci.append((f"{_ci_key.capitalize()} 95% CI(근사)",
+                                       f"{_num(_ci_lo)} ~ {_num(_ci_hi)}", "muted"))
+    with d1:
+        st.markdown(_kv_block("규격 및 능력 지수", _spec_rows), unsafe_allow_html=True)
+    with d2:
+        st.markdown(_kv_block("불량률 및 이탈 집계", _ppm_rows), unsafe_allow_html=True)
+    with d3:
+        st.markdown(_kv_block("관리한계선 파라미터", _ctrl_rows), unsafe_allow_html=True)
+    with d4:
+        st.markdown(_kv_block("기초 통계량", _basic_rows_core), unsafe_allow_html=True)
+
+    a1, a2, a3 = st.columns([1.0, 1.0, 1.20])
+    with a1:
+        st.markdown(_kv_block("변동/목표 편차", _aux_rows_var_target, "stats-block-compact"), unsafe_allow_html=True)
+    with a2:
+        st.markdown(_kv_block("규격 여유", _aux_rows_margin, "stats-block-compact"), unsafe_allow_html=True)
+    with a3:
+        st.markdown(_kv_block("분포 형상/능력 CI", _aux_rows_shape_ci, "stats-block-compact"), unsafe_allow_html=True)
+
+    _ksq_total = sum(int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9))
+    _ksq_df = pd.DataFrame([{f'T{j}': int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9)}], index=["위반 건수"])
+    if it.get('distribution_mode') == 'nonnormal':
+        st.caption(it.get('pearson_rules_note', ''))
+        _ksq_df = _ksq_df[['T1']]
+    st.markdown("**관리한계 이탈 진단 (T1)**" if it.get('distribution_mode') == 'nonnormal' else "**KSQ 규칙 진단 매트릭스 (T1~T8)**")
+    try:
+        _ksq_style = lambda v: STATUS_CELL_STYLES['bad' if int(v) > 0 else 'good']
+        if hasattr(_ksq_df.style, 'map'):
+            _ksq_styled = _ksq_df.style.map(_ksq_style)
+        else:
+            _ksq_styled = _ksq_df.style.applymap(_ksq_style)
+        st.dataframe(_ksq_styled, use_container_width=True)
+    except Exception:
+        st.dataframe(_ksq_df, use_container_width=True)
+
+    if _ksq_total == 0:
+        _ksq_cls = "good"
+        _ksq_txt = "KSQ 규칙 위반 없음"
+    else:
+        _ksq_cls = "bad"
+        _ksq_txt = f"KSQ 규칙 위반 {int(_ksq_total)}건 감지"
+    st.markdown(
+        f"<div class='stats-note {_ksq_cls}'><b>규칙 판정:</b> {_ksq_txt}</div>",
+        unsafe_allow_html=True,
     )
-    st.caption(f"군 개수가 많아 가로 스크롤로 표시합니다. 표시 군: {group_count}개")
-    _show_control_chart_figure(fig, scroll_css_width=int(width_in * _CONTROL_SCROLL_PX_PER_INCH))
+
+    if "만족" in _norm_msg:
+        _norm_cls = "good"
+        _norm_txt = "정규성 가정에 대체로 부합"
+    elif "의심" in _norm_msg:
+        _norm_cls = "bad"
+        _norm_txt = "정규성 이탈 가능성 높음"
+    else:
+        _norm_cls = "warn"
+        _norm_txt = "정규성 판정 정보 확인 필요"
+    st.markdown(
+        f"<div class='stats-note {_norm_cls}'><b>정규성 검정:</b> {_norm_txt} · {_norm_msg}</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _mode_changed():
@@ -2260,13 +2802,36 @@ def _mode_changed():
     _save_config()
 
 
+def _open_intermediate():
+    st.session_state['beginner_mode'] = False
+    _mode_changed()
+
+
+def _render_baseline_input():
+    baseline_unit = "샘플" if st.session_state['n'] == 1 else "부분군"
+    baseline_subgroups = st.number_input(
+        f"기준구간 수 (초기 {baseline_unit})",
+        min_value=3,
+        max_value=200,
+        value=int(st.session_state.get('baseline_subgroups', 25)),
+        help="초기 기준구간으로 관리한계를 계산하고 이후 데이터는 같은 한계로 감시합니다. 실무에서는 20~25개 이상 권장입니다.",
+    )
+    st.session_state['baseline_subgroups'] = int(baseline_subgroups)
+    if st.session_state['chart_usage_mode'] == EXTENDED_MODE:
+        st.caption("기준구간으로 확장 X̄와 S의 관리한계를 계산합니다. 자동 산정에는 유효 기준 부분군이 6개 이상 필요합니다.")
+    else:
+        st.caption("관리용은 안정하다고 판단되는 초기 구간으로 한계선을 고정하고, 이후 구간만 감시용으로 판정합니다.")
+
+
 # ─────────────────────────── 사이드바 ───────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ 분석 설정")
 
     _bm = st.radio('사용 모드', [True, False], key='beginner_mode', horizontal=True,
         format_func=lambda value: '🔰 초보자' if value else '중급자 이상', on_change=_mode_changed)
-    st.caption('쉬운 입력과 설명으로 관리도·공정능력·전체 결과를 확인합니다.' if _bm else '상세 통계와 고급 분석 기능을 사용할 수 있습니다.')
+    st.caption('핵심 공정능력 지수와 관리도를 한 화면에서 확인합니다.' if _bm else '상세 통계와 고급 분석 기능을 사용할 수 있습니다.')
+    st.caption(f"관리도 선택 · {chart_selection_label(st.session_state)}")
+    _chart_guide_slot = st.empty()
 
     st.divider()
 
@@ -2465,18 +3030,20 @@ with st.sidebar:
 
         st.divider()
 
-    if education_mode():
-        from spc_education import render_samples
-        render_samples()
+    render_samples(expanded=education_mode())
 
     from spc_file_ui import render_file_inputs
     render_file_inputs()
     from spc_review_ui import render_assessment_settings
-    render_assessment_settings(_save_config)
+    if _bm:
+        beginner_conditions()
+        st.button('중급자 모드에서 확인', key='beginner_open_intermediate', on_click=_open_intermediate,
+                  help='평가 기준 변경과 상세 분석을 확인합니다. 현재 파일과 분석 결과는 유지됩니다.')
 
     if not _bm:
-        # ── 공정 정보 (선택) ──
-        with st.expander("🏭 공정 정보"):
+        with st.expander("공정·평가"):
+            render_assessment_settings(_save_config)
+            st.markdown("#### 공정 정보")
             st.caption("분석 계산에는 사용하지 않고, 결과 화면과 다운로드 리포트의 식별 정보로 저장합니다.")
             proc_c1, proc_c2 = st.columns(2)
             for idx, (key, label) in enumerate(PROCESS_INFO_FIELDS):
@@ -2493,8 +3060,6 @@ with st.sidebar:
                     st.session_state[f"process_info_{key}"] = ""
                 _save_config()
                 st.rerun()
-
-        st.divider()
 
     _df_layout = None
     _all_col_labels = []
@@ -2513,8 +3078,8 @@ with st.sidebar:
             _numeric_col_labels = []
 
     if not _bm:
-        # ── 분석 파라미터 ──
-        with st.expander("🔧 분석 파라미터"):
+        with st.expander("분석·관리도"):
+            st.markdown("#### 분석 파라미터")
             # 프리셋 불러오기
             presets = st.session_state.get('param_presets', [])
             if presets:
@@ -2682,28 +3247,23 @@ with st.sidebar:
             mode_labels = {
                 'phase1': "해석용 관리도",
                 'phase2': "관리용 관리도",
+                EXTENDED_MODE: "확장 슈하르트 관리도",
             }
+            saved_mode = st.session_state.get('chart_usage_mode', 'phase1')
             chart_usage_mode = st.radio(
                 "관리도 운영 모드",
                 options=list(mode_labels.keys()),
-                index=list(mode_labels.keys()).index(st.session_state.get('chart_usage_mode', 'phase1')),
+                index=list(mode_labels).index(saved_mode) if saved_mode in mode_labels else 0,
                 format_func=lambda x: mode_labels.get(x, x),
             )
             st.session_state['chart_usage_mode'] = chart_usage_mode
+            if chart_usage_mode != EXTENDED_MODE:
+                st.session_state['_standard_chart_usage_mode'] = chart_usage_mode
 
-            baseline_unit = "샘플" if st.session_state['n'] == 1 else "부분군"
             if chart_usage_mode == 'phase1':
                 st.caption("해석용은 현재 데이터 전체로 시험 관리한계를 계산해 공정 안정 상태를 먼저 확인합니다.")
             else:
-                baseline_subgroups = st.number_input(
-                    f"기준구간 수 (초기 {baseline_unit})",
-                    min_value=3,
-                    max_value=200,
-                    value=int(st.session_state.get('baseline_subgroups', 25)),
-                    help="초기 기준구간으로 관리한계를 계산하고 이후 데이터는 같은 한계로 감시합니다. 실무에서는 20~25개 이상 권장입니다.",
-                )
-                st.session_state['baseline_subgroups'] = int(baseline_subgroups)
-                st.caption("관리용은 안정하다고 판단되는 초기 구간으로 한계선을 고정하고, 이후 구간만 감시용으로 판정합니다.")
+                _render_baseline_input()
 
             hist_bins = st.slider("히스토그램 구간 수", 5, 100, st.session_state['hist_bins'])
             st.session_state['hist_bins'] = hist_bins
@@ -2742,8 +3302,7 @@ with st.sidebar:
                     _save_config()
                     st.success(f"'{new_p['name']}' 저장됨")
 
-        # ── 데이터 전처리 설정 ──
-        with st.expander("🧹 데이터 전처리 설정"):
+            st.markdown("#### 데이터 전처리 설정")
             st.caption("데이터의 신뢰성을 높이기 위한 전처리 옵션입니다.")
             st.checkbox(
                 "결측 포함 부분군 제외 (기본)",
@@ -2774,10 +3333,7 @@ with st.sidebar:
                 help="Box-Cox 변환 후 능력을 추정합니다. 관리용 모드는 원본 기준구간에서 추정한 λ와 이동량을 감시 데이터에도 적용합니다."
             )
 
-        st.divider()
-
-        # ── KSQ 규칙 / 존 표시 ──
-        with st.expander("📏 KSQ 규칙 / 존 설정"):
+            st.markdown("#### KSQ 규칙 / 존 설정")
             ksq_options = [
                 'T2: 중심선 한쪽 9점',
                 'T3: 연속 증가/감소 6점',
@@ -2829,11 +3385,8 @@ with st.sidebar:
     - **T8 (8 outside Zone C)**: 혼합군 가능성. 라인/금형/공급처/작업자 분리 분석 권장
     """)
 
-        st.divider()
-
-        # ── 이메일 알림 설정 ──
         if not education_mode():
-            with st.expander("📧 이메일 알림 설정"):
+            with st.expander("이메일 알림"):
                 st.caption("규격/관리한계 이탈 시 SMTP 메일 발송")
                 smtp_host_sb = st.text_input("SMTP 호스트", value="smtp.gmail.com", key="sb_smtp_host")
                 smtp_port_sb = st.number_input("포트", min_value=1, max_value=65535, value=465, key="sb_smtp_port")
@@ -2998,12 +3551,11 @@ with st.sidebar:
 
     if _bm:
         beginner_inputs(_df_layout)
-        applied_conditions()
+        if st.session_state.get('chart_usage_mode') in ('phase2', EXTENDED_MODE):
+            _render_baseline_input()
     elif _df_layout is not None and st.session_state.get('data_layout_mode') == 'long':
         _choices = [c for c in _numeric_col_labels if c != st.session_state.get('measurement_date_column')]
-        _chosen = st.session_state.get('selected_columns')
-        st.session_state['selected_columns'] = st.multiselect('분석할 측정 항목', _choices,
-            default=[c for c in _chosen if c in _choices] if _chosen is not None else _choices)
+        measurement_column_picker(_choices)
 
     _preflight_preview = _inspect_current_inputs()
     st.session_state["analysis_preview"] = _preflight_preview
@@ -3011,19 +3563,27 @@ with st.sidebar:
     st.divider()
 
     # ── 분석 실행 버튼 ──
-    run_btn = st.button("▶ 분석 시작", type="primary", use_container_width=True)
+    _chart_selection_error = chart_selection_error(st.session_state)
+    if _chart_selection_error:
+        st.warning(_chart_selection_error)
+    run_btn = st.button("▶ 분석 시작", type="primary", use_container_width=True,
+                        disabled=bool(_chart_selection_error))
 
 
 # ─────────────────────────── 분석 실행 ───────────────────────────
 _auto_triggered = st.session_state.pop('_trigger_analysis', False)
-if run_btn or _auto_triggered:
-    if not st.session_state.get('data_bytes'):
+_watch_file_changed = st.session_state.pop('_watch_file_changed', False)
+_refresh_normal_start = st.session_state.pop('_refresh_normal_start', False)
+if run_btn or _auto_triggered or _watch_file_changed or _refresh_normal_start:
+    if _chart_selection_error:
+        st.error(_chart_selection_error)
+    elif not st.session_state.get('data_bytes'):
         st.error("데이터 파일을 먼저 업로드하세요.")
     elif (
         st.session_state.get('data_layout_mode') == 'wide_subgroup_cols'
         and len(st.session_state.get('subgroup_columns', [])) < 2
     ):
-        st.error("부분군 다열 모드에서는 측정 열을 2개 이상 선택하세요. (🔧 분석 파라미터 → 측정열 자동 선택)")
+        st.error("부분군 다열 모드에서는 측정 열을 2개 이상 선택하세요. (분석·관리도 → 분석 파라미터 → 측정열 자동 선택)")
     else:
         with st.spinner("분석 중..."):
             try:
@@ -3052,22 +3612,27 @@ if run_btn or _auto_triggered:
                 results, summary_df = ui_analysis(st.session_state,
                     **request, progress_callback=update_progress)
                 progress.empty()
+                if not results:
+                    errors = summary_df.get('오류', pd.Series(dtype=str)).dropna().unique()
+                    raise ValueError(" / ".join(errors[:3]) or "분석 가능한 측정 항목이 없습니다.")
                 st.session_state['results'] = results
                 st.session_state['summary_df'] = summary_df
                 st.session_state['analysis_done'] = True
                 st.session_state['analysis_meta'] = _current_analysis_meta(st.session_state.get("analysis_preview", {}))
                 st.session_state['analysis_meta'].update(summary_df.attrs.get('audit', {}))
+                if request['chart_usage_mode'] == EXTENDED_MODE and not _watch_file_changed:
+                    st.session_state['_extended_result_view'] = 'chart'
                 _push_analysis_history(results)
                 _save_last_analysis_env()
                 _save_config()
                 st.success(f"분석 완료: 변수 {len(results)}개")
 
                 # 자동 감시 트리거 + 이탈 발생 시 전체 즐겨찾기 분석 후 통합 이메일 발송
-                if _auto_triggered and st.session_state.get('auto_watch_enabled'):
+                if _watch_file_changed and not _refresh_normal_start and st.session_state.get('auto_watch_enabled'):
                     _has_violation = (
                         any(assess_process(it)['level'] != 'low' for it in results)
                         or
-                        any(np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _required_limit() for it in results)
+                        any(_item_band(it) in ('bad', 'warn') for it in results)
                         or any(it.get('spec_violation_count', 0) > 0 for it in results)
                     )
                     if _has_violation:
@@ -3138,18 +3703,18 @@ if (
     st.session_state['_trigger_analysis'] = True
     st.rerun()
 
-st.markdown("""
-<div class="main-header">
-  <h1>📊 SPC Studio · 계량형</h1>
-  <p>Xbar-R / Xbar-S / I-MR 관리도 · Cpk/Ppk · KS Q ISO 7870-2 T1~T8 검출 · Excel/PDF 내보내기</p>
-</div>
-""", unsafe_allow_html=True)
+render_studio_header()
+
+if not st.session_state['analysis_done'] or _chart_guide_slot.toggle("관리도 선택 가이드 열기", key="_show_chart_guide"):
+    render_chart_guide(_chart_selection_error, frame=_df_layout)
+    st.divider()
 
 # ── 상태바 (분석 완료 시) ──
-if st.session_state.get('analysis_done') and all(it.get('detail_level') != 'core' for it in st.session_state.get('results', [])):
+_extended_result = any(it.get('chart_usage_mode') == EXTENDED_MODE for it in st.session_state.get('results', []))
+if not _extended_result and not st.session_state.get('beginner_mode') and st.session_state.get('analysis_done') and all(it.get('detail_level') != 'core' for it in st.session_state.get('results', [])):
     _r = st.session_state.get('results', [])
-    _nb  = sum(1 for it in _r if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit())
-    _nw  = sum(1 for it in _r if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit())
+    _nb  = sum(1 for it in _r if _item_band(it) == 'bad')
+    _nw  = sum(1 for it in _r if _item_band(it) == 'warn')
     _ns  = sum(it.get('spec_violation_count', 0) for it in _r)
     _hist = st.session_state.get('analysis_history', [])
     _last_t = _hist[-1]['time'] if _hist else "—"
@@ -3161,9 +3726,9 @@ if st.session_state.get('analysis_done') and all(it.get('detail_level') != 'core
         _wi   = st.session_state.get('auto_watch_fav_idx', 0)
         _watch_fav = _favs[_wi]['name'] if _favs and _wi < len(_favs) else ""
 
-    _badge_bad  = f'<span style="background:rgba(220,38,38,0.7);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">불량 {_nb}개</span>' if _nb else ''
-    _badge_warn = f'<span style="background:rgba(217,119,6,0.7);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">주의 {_nw}개</span>' if _nw else ''
-    _badge_spec = f'<span style="background:rgba(234,88,12,0.6);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">이탈 {_ns}건</span>' if _ns else ''
+    _badge_bad  = f'<span style="background:#b42318;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85rem">불량 {_nb}개</span>' if _nb else ''
+    _badge_warn = f'<span style="background:#92400e;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85rem">주의 {_nw}개</span>' if _nw else ''
+    _badge_spec = f'<span style="background:#9a3412;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85rem">이탈 {_ns}건</span>' if _ns else ''
     _watch_checked = st.session_state.get('_watch_last_checked_at', '')
     _watch_changed = st.session_state.get('_watch_last_change_at', '')
     _watch_status = st.session_state.get('_watch_last_status', '')
@@ -3174,8 +3739,8 @@ if st.session_state.get('analysis_done') and all(it.get('detail_level') != 'core
         _watch_detail += f" · 변경 {_watch_changed}"
     elif _watch_status:
         _watch_detail += f" · {_watch_status}"
-    _watch_badge = f'<span style="background:rgba(34,197,94,0.7);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">🔄 감시중: {_watch_detail}</span>' if _watch_on else ''
-    _ok_badge    = '<span style="background:rgba(34,197,94,0.7);color:#fff;padding:1px 7px;border-radius:10px;font-size:0.8rem">✓ 관측 구간 양호</span>' if _r and all(assess_process(it)['level'] == 'low' for it in _r) else ''
+    _watch_badge = f'<span style="background:#047857;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85rem">🔄 감시중: {_watch_detail}</span>' if _watch_on else ''
+    _ok_badge    = '<span style="background:#047857;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85rem">✓ 관측 구간 양호</span>' if _r and all(assess_process(it)['level'] == 'low' for it in _r) else ''
 
     _src_txt = f" | {_src}" if _src else ""
     st.markdown(
@@ -3188,6 +3753,15 @@ if st.session_state.get('analysis_done') and all(it.get('detail_level') != 'core
     )
 
 if not st.session_state['analysis_done']:
+    if st.session_state.get('chart_usage_mode') == EXTENDED_MODE:
+        st.stop()
+    if st.session_state.get('beginner_mode'):
+        st.subheader('관리도와 공정능력을 간단하게 확인하세요')
+        st.markdown('1. 왼쪽에서 측정 데이터를 올리고 필요하면 규격 파일을 선택하세요.\n'
+                    '2. 측정 항목과 한 번에 함께 측정한 개수를 확인하세요.\n'
+                    '3. **분석 시작**을 누르면 핵심 지수와 관리도를 확인할 수 있습니다.')
+        st.caption('규격이 없으면 관리도만 확인할 수 있습니다. 상세 분석과 평가 기준 변경은 중급자 모드에서 제공합니다.')
+        st.stop()
     # ── 온보딩 가이드 ──
     st.markdown("## 처음 사용하시나요? 4단계로 시작하세요")
     _main_preview = st.session_state.get("analysis_preview") or _inspect_current_inputs()
@@ -3257,15 +3831,12 @@ if not st.session_state['analysis_done']:
 
 헤더 이름은 자동으로 인식됩니다 (column/item/변수/항목 등).
 목표치(Target)를 비우면 USL/LSL의 중간값을 자동 사용합니다.
-필요 시 `🔧 분석 파라미터 → 수동 목표치 사용`에서 변수별 목표치를 직접 입력해 덮어쓸 수 있습니다.
+필요 시 `분석·관리도 → 분석 파라미터 → 수동 목표치 사용`에서 변수별 목표치를 직접 입력해 덮어쓸 수 있습니다.
 """)
 
     st.markdown("---")
     st.markdown(_threshold_text("""
 ### 주요 기능
-- **Xbar-R 관리도**: n=2~9일 때 부분군 평균-범위 관리도
-- **Xbar-S 관리도**: n≥10일 때 부분군 평균-표준편차 관리도 (자동 전환)
-- **I-MR 관리도**: n=1일 때 개별값-이동범위 관리도
 - **공정능력 지수**: Cp, Cpk, Pp, Ppk, Cpm, Cpmk (단측 규격 지원, 목표치 반영), Cw·Cwk (n=1 MR 기반 참고 / n≥2 군내 진단용)
 - **PPM 계산**: Within/Overall/실측 불량률
 - **KSQ 규칙 검출**: KS Q ISO 7870-2 T1~T8 규칙 위반점 표시
@@ -3279,7 +3850,7 @@ if not st.session_state['analysis_done']:
 
 
 # ─────────────────────────── 결과 표시 ───────────────────────────
-results    = st.session_state['results']
+results    = with_extended_results(st.session_state['results'])
 summary_df = st.session_state['summary_df']
 palette    = st.session_state['palette']
 
@@ -3295,11 +3866,35 @@ if summary_df is not None and '오류' in summary_df.columns:
         st.warning(f"{len(calculation_errors)}개 변수는 계산하지 못했습니다. 아래 사유를 확인하세요.")
         st.dataframe(calculation_errors[['변수', '오류']], hide_index=True, use_container_width=True)
 
+if _extended_result:
+    beginner = st.session_state.get('beginner_mode')
+    view = st.radio("확장 슈하르트 결과 보기", ['chart', 'reports'], horizontal=True,
+                    format_func=lambda v: EXTENDED_TITLE if v == 'chart' else ("공정능력" if beginner else "공정능력·보고서"),
+                    key='_extended_result_view', label_visibility='collapsed')
+    if view == 'chart':
+        item, _ = _select_detail_item(results)
+        render_extended(item, results, palette)
+        st.stop()
+    st.caption("공정능력과 관리 상태 참고값은 공정능력 분석 기준으로 표시합니다. 확장 X̄와 S의 이탈 건수는 확장 관리도에서 확인하세요.")
+    if beginner:
+        quick_results(results, render_chart=None)
+        st.stop()
+
+if st.session_state.get('beginner_mode'):
+    def render_beginner_chart(item):
+        return _render_control_chart_scrollable(
+            item, palette, st.session_state['ksq_toggles'], st.session_state['show_zones'], view_key='beginner')
+    quick_results(results, render_chart=render_beginner_chart)
+    render_ocap_exercise(results)
+    st.stop()
+
+
+render_ocap_exercise(results)
 col_names  = [it['column'] for it in results]
 n_cols     = len(results)
 control_phase_global = str(results[0].get('control_phase', 'phase1')) if results else 'phase1'
-n_cpk_bad  = sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit())
-n_cpk_warn = sum(1 for it in results if np.isfinite(it.get('cpk', np.nan)) and _warning_limit() <= it['cpk'] < _required_limit())
+n_cpk_bad  = sum(1 for it in results if _item_band(it) == 'bad')
+n_cpk_warn = sum(1 for it in results if _item_band(it) == 'warn')
 n_spec_vio = sum(it.get('spec_violation_count', 0) for it in results)
 n_ctrl_vio = sum(_get_ctrl_total(it) for it in results)
 ctrl_metric_label = "관리한계 이탈 (감시구간)" if control_phase_global == 'phase2' else "관리한계 이탈 (누적)"
@@ -3313,9 +3908,11 @@ ctrl_metric_help = (
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("분석 변수 수", f"{n_cols}개",
           help="분석한 측정 항목의 총 개수입니다.")
-m2.metric(_threshold_text("Cpk < 1.33 (주의)"), f"{n_cpk_warn}개" if results[0].get('detail_level') != 'core' else '미계산',
+_auto_summary = any(it.get('capability_criteria', {}).get('mode') == 'aiag_vda' for it in results)
+_adjusted_cpk = sum(it.get('capability_criteria', {}).get('indices', {}).get('cpk', {}).get('status') == 'met' and len(it['series']) < 125 for it in results)
+m2.metric('Cpk 조정 목표값 충족' if _auto_summary else _threshold_text("Cpk < 1.33 (주의)"), f"{_adjusted_cpk if _auto_summary else n_cpk_warn}개" if results[0].get('detail_level') != 'core' else '미계산',
           delta=f"-{n_cpk_warn}" if n_cpk_warn else None, delta_color="inverse",
-          help=_threshold_text("공정능력 지수(Cpk)가 1.33 미만인 항목 수. 지속적인 모니터링이 필요합니다."))
+          help='N<125에서 첨부 식으로 계산한 조정 목표값을 충족한 항목 수입니다.' if _auto_summary else _threshold_text("공정능력 지수(Cpk)가 1.33 미만인 항목 수. 지속적인 모니터링이 필요합니다."))
 m3.metric(_threshold_text("Cpk < 1.00 (불량)"), f"{n_cpk_bad}개" if results[0].get('detail_level') != 'core' else '미계산',
           delta=f"-{n_cpk_bad}" if n_cpk_bad else None, delta_color="inverse",
           help=_threshold_text("공정능력 지수(Cpk)가 1.00 미만인 항목 수. 규격 이탈이 발생할 수 있어 즉시 조치가 필요합니다."))
@@ -3346,30 +3943,25 @@ if control_phase_global == 'phase2':
 
 # ── 행 하이라이트 함수 ──
 def _highlight_row(df_row):
-    worst = np.inf
-    for cn in ['Cpk', 'Ppk', 'Cpm', 'Cpmk']:
-        if cn in df_row.index:
-            try:
-                v = float(df_row[cn])
-                if np.isfinite(v): worst = min(worst, v)
-            except Exception: pass
-    if worst < _warning_limit():
-        row_bg    = 'background-color: rgba(220, 38, 38, 0.18)'
-        cpk_style = 'background-color: rgba(220,38,38,0.55); color:#ff9999; font-weight:bold'
-    elif worst < _required_limit():
-        row_bg    = 'background-color: rgba(217, 119, 6, 0.18)'
-        cpk_style = 'background-color: rgba(217,119,6,0.55); color:#ffe066; font-weight:bold'
-    else:
-        row_bg    = ''
-        cpk_style = 'color:#4ade80; font-weight:bold'
-    styles = [row_bg] * len(df_row)
-    for cn in ['Cpk', 'Ppk', 'Cpm', 'Cpmk']:
-        if cn in df_row.index: styles[df_row.index.get_loc(cn)] = cpk_style
-    for cn in ['최근규격이탈', '최근관리이탈']:
+    item = next((r for r in results if str(r['column']) == str(df_row.get('변수', ''))), None)
+    metric_columns = {name: name.lower() for name in ('Cp', 'Cpk', 'Pp', 'Ppk', 'Cpm', 'Cpmk')}
+    if '폭 지수' in df_row.index:
+        pair = screening_index_pair(item)
+        metric_columns.update({'폭 지수': pair['width_metric'], '치우침 반영 지수': pair['shifted_metric']})
+    # Each index keeps its own existing decision; colors never copy the worst index.
+    styles = [''] * len(df_row)
+    for column, metric in metric_columns.items():
+        if column in df_row.index:
+            if column == '치우침 반영 지수':
+                state = screening_index_band(item)
+            else:
+                state = _item_band(item, metric) if item is not None and metric else 'na'
+            styles[df_row.index.get_loc(column)] = STATUS_CELL_STYLES.get(state, STATUS_CELL_STYLES['na'])
+    for cn in ('규격이탈', '관리이탈', 'X관리이탈', 'R관리이탈', '최근규격이탈', '최근관리이탈'):
         if cn in df_row.index:
             try:
                 if int(df_row[cn]) > 0:
-                    styles[df_row.index.get_loc(cn)] = 'background-color:rgba(234,88,12,0.50); color:#fed7aa; font-weight:bold'
+                    styles[df_row.index.get_loc(cn)] = STATUS_CELL_STYLES['bad']
             except Exception: pass
     return styles
 
@@ -3393,17 +3985,27 @@ def _show_chart_modal(it, chart_type, range_mode='spec'):
         fig = build_histogram(it, palette=palette, bins=st.session_state['hist_bins'], range_mode=range_mode)
     else:
         fig = build_qq_plot(it, palette=palette)
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
+    _fig_to_st(fig, vector=chart_type in ('hist', 'qq'))
 
 # ═══════════════════════════════════════════════════════
-# 5개 고정 탭
-# ═══════════════════════════════════════════════════════
-# 5개 고정 탭 → 7개로 확장
-tab_ctrl, tab_dash, tab_summ, tab_stab, tab_corr, tab_chat, tab_export = st.tabs(
-    ["📉 관리도", "📊 대시보드", "📋 선별 요약", "📈 안정성", "🔗 상관분석", "💬 AI 챗봇", "💾 내보내기"],
-    key="advanced_tabs", on_change="rerun",
+# 결과 탭 — 선택한 화면만 계산
+_result_labels = ["📉 관리도", "📊 대시보드", "📋 선별 요약", "📈 안정성", "🔗 상관분석",
+                  "📈 히스토그램 / Q-Q", "📊 상세 통계", "💬 AI 챗봇", "💾 내보내기"]
+tab_ctrl, tab_dash, tab_summ, tab_stab, tab_corr, tab_dist, tab_stats, tab_chat, tab_export = (
+    (_ResultPanel(False), *_result_tabs(_result_labels[1:])) if _extended_result else _result_tabs(_result_labels)
 )
+
+with tab_dist:
+    if tab_dist.open:
+        st.subheader('히스토그램 / Q-Q 플롯')
+        it, _vi = _select_detail_item(results)
+        _render_distribution_detail(it, _vi, palette)
+
+with tab_stats:
+    if tab_stats.open:
+        st.subheader('상세 통계')
+        it, _vi = _select_detail_item(results)
+        _render_statistics_detail(it)
 
 # ══════════════════════════════════════════════
 # TAB: 상관분석
@@ -3462,16 +4064,19 @@ with tab_corr:
                 )
 
                 if len(sel_corr_cols) >= 2:
-                    c1, c2 = st.columns([1, 1])
+                    c1, c2 = st.columns([1.3, 1])
                     with c1:
                         st.markdown("**1. 상관관계 히트맵**")
                         with st.spinner("히트맵 생성 중..."):
                             fig_corr = build_correlation_heatmap(df_full, sel_corr_cols, palette=palette)
-                            _fig_to_st(fig_corr)
+                            _fig_to_st(fig_corr, vector=True)
                     with c2:
                         st.markdown("**2. 상관계수 표 (Pearson)**")
-                        st.dataframe(df_full[sel_corr_cols].corr().style.background_gradient(cmap='RdBu_r', axis=None), 
+                        st.dataframe(correlation_matrix(df_full, sel_corr_cols).style
+                                     .background_gradient(cmap='RdBu_r', axis=None, vmin=-1, vmax=1)
+                                     .format('{:.3f}', na_rep='—'),
                                      use_container_width=True)
+                        st.caption('색상 범위는 −1~+1로 고정합니다. 히트맵과 표는 선택 변수의 측정값이 모두 있는 행을 공통 사용하며, 결측·상수 열로 계산할 수 없는 값은 —로 표시합니다.')
 
                     st.divider()
                     st.markdown("**3. 다변량 산점도 및 분포 행렬**")
@@ -3567,7 +4172,7 @@ with tab_chat:
     # ══════════════════════════════════════════════
 with tab_dash:
     if tab_dash.open:
-        st.subheader("공정능력 대시보드")
+        st.subheader("능력·성능 대시보드")
         from spc_dashboard import render_dashboard
         render_dashboard(results, palette=palette)
 
@@ -3611,7 +4216,7 @@ with tab_summ:
 
         if st.session_state.get('beginner_mode'):
             st.info(
-                "💡 **이 표 보는 법** — 맨 오른쪽 **판정** 컬럼을 먼저 확인하세요.  \n"
+                "💡 **이 표 보는 법** — **판정** 컬럼을 먼저 확인하세요.  \n"
                 "🔴 빨강 행은 즉시 조치가 필요합니다. 행을 클릭하면 해당 변수의 관리도로 이동합니다."
             )
 
@@ -3625,11 +4230,11 @@ with tab_summ:
             fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
             _flt = st.session_state.get('summary_filter', 'all')
             if fc1.button("전체 보기",        type="primary" if _flt=='all'  else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'all';  st.rerun()
-            if fc2.button(_threshold_text("불량 (Cpk<1.00)"), type="primary" if _flt=='bad'  else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'bad';  st.rerun()
+            if fc2.button("표시 지표 미달", type="primary" if _flt=='bad'  else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'bad';  st.rerun()
             if fc3.button("주의 이상",        type="primary" if _flt=='warn' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'warn'; st.rerun()
             if fc4.button("규격 이탈",        type="primary" if _flt=='spec' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'spec'; st.rerun()
             if fc5.button("관리 이탈",        type="primary" if _flt=='ctrl' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'ctrl'; st.rerun()
-            if fc6.button("능력 기준 충족", type="primary" if _flt=='good' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'good'; st.rerun()
+            if fc6.button("표시 지표 기준 충족", type="primary" if _flt=='good' else "secondary", use_container_width=True): st.session_state['summary_filter'] = 'good'; st.rerun()
 
             # 검색
             search_q = st.text_input("변수명 검색", placeholder="변수명 입력...", key="summ_search", label_visibility="collapsed")
@@ -3638,11 +4243,11 @@ with tab_summ:
             _flt = st.session_state.get('summary_filter', 'all')
             show_results = results
             if _flt == 'bad':
-                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _warning_limit()]
+                show_results = [it for it in results if screening_index_band(it) == 'bad']
             elif _flt == 'warn':
-                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] < _required_limit()]
+                show_results = [it for it in results if screening_index_band(it) in ('bad', 'warn')]
             elif _flt == 'good':
-                show_results = [it for it in results if np.isfinite(it.get('cpk', np.nan)) and it['cpk'] >= _required_limit()]
+                show_results = [it for it in results if screening_index_band(it) == 'good']
             elif _flt == 'spec':
                 show_results = [it for it in results if it.get('spec_violation_count', 0) > 0]
             elif _flt == 'ctrl':
@@ -3653,24 +4258,48 @@ with tab_summ:
             show_cols = [str(it['column']) for it in show_results]
             _df_show = summary_df[summary_df['변수'].astype(str).isin(show_cols)] if '변수' in summary_df.columns else summary_df.iloc[[i for i, it in enumerate(results) if it in show_results]]
 
-            # Cpk 오름차순 정렬
-            if 'Cpk' in _df_show.columns:
-                try:
-                    _df_show = _df_show.copy()
-                    _df_show['_cpk_sort'] = pd.to_numeric(_df_show['Cpk'], errors='coerce')
-                    _df_show = _df_show.sort_values('_cpk_sort').drop(columns=['_cpk_sort'])
-                except Exception: pass
+            # 표시 지수(Cpk 또는 Ppk) 기준 오름차순 정렬
+            if '변수' in _df_show.columns:
+                displayed = {str(it['column']): it.get(screening_index_pair(it)['shifted_metric'], np.nan)
+                             for it in show_results}
+                _df_show = _df_show.sort_values('변수', key=lambda col: col.astype(str).map(displayed),
+                                                kind='stable')
 
-            # 판정 컬럼 추가 (3-3)
             _df_show = _summary_visible_df(_df_show)
-
-            st.caption(f"표시: {len(_df_show)}개 / 전체 {len(summary_df)}개  ← 행 클릭 시 관리도 표시")
+            _summary_items = {str(it['column']): it for it in results}
+            _row_items = [_summary_items.get(str(name)) for name in _df_show['변수']]
+            _pairs = [screening_index_pair(it) for it in _row_items]
+            for _column, _key in (('평가 상태', 'state'), ('폭 지수', 'width'), ('치우침 반영 지수', 'shifted')):
+                _df_show[_column] = [pair[_key] for pair in _pairs]
+            _df_show['판정'] = [assess_process(it)['text'] if it is not None else '계산 불가' for it in _row_items]
+            _df_show['관리이탈'] = [_get_ctrl_total(it) if it is not None else None for it in _row_items]
+            for _metric in ('Cw', 'Cwk'):
+                if _metric not in _df_show.columns:
+                    _df_show[_metric] = [fmt_value(it.get(_metric.lower(), np.nan)) if it is not None else '—' for it in _row_items]
+            _summary_view = st.radio('표시 항목', list(SUMMARY_VIEWS), horizontal=True, key='summary_view')
+            _df_table = _summary_view_df(_df_show, _summary_view)
+            _summary_config = {
+                '변수': st.column_config.Column('변수', pinned=True, width='small'),
+                '판정': st.column_config.Column('판정', pinned=True, width='medium', help='규격 이탈, 관리 상태와 분석 조건을 함께 확인한 결과입니다.'),
+                '평가 상태': st.column_config.Column('평가 상태', pinned=True, width='medium', help='능력 적용 가능이면 Cp·Cpk, 그 외에는 Pp·Ppk를 참고값으로 표시합니다. 관리 상태와 분포 조건을 함께 확인합니다.'),
+                '폭 지수': st.column_config.Column('폭 지수', help='적용 조건 충족 시 Cp, 그 외에는 Pp. 양측 규격이 필요합니다.'),
+                '치우침 반영 지수': st.column_config.Column('치우침 반영 지수', help='적용 조건 충족 시 Cpk, 그 외에는 Ppk. 셀에 실제 지표명을 함께 표시합니다.'),
+                'Cwk': st.column_config.Column('Cwk', help='군내산포 고려. n=1은 MR 기반 참고값입니다.'),
+                'Cw': st.column_config.Column('Cw', help='군내산포 고려. n=1은 MR 기반 참고값입니다.'),
+                '관리이탈': st.column_config.Column('관리이탈', help='X·산포 관리도 이탈 건수의 합계. 관리용은 감시 구간 기준입니다.'),
+            }
+            # Reset selection when the visible row set/order or view changes.
+            _summary_table_key = f"summary_table_{_summary_view}_{hash(tuple(_df_show['변수'].astype(str)))}"
+            _row_detail = "상세 정보" if _extended_result else "상세 정보와 관리도"
+            st.caption(f"표시: {len(_df_table)}개 / 전체 {len(summary_df)}개 · {_summary_view} · 행을 선택하면 {_row_detail}가 표시됩니다.")
             try:
-                styled = _df_show.style.apply(_highlight_row, axis=1)
+                styled = _df_table.style.apply(_highlight_row, axis=1)
                 _summ_event = st.dataframe(styled, use_container_width=True, height=420,
+                                           hide_index=True, column_config=_summary_config, key=_summary_table_key,
                                            on_select="rerun", selection_mode="single-row")
             except Exception:
-                _summ_event = st.dataframe(_df_show, use_container_width=True, height=420,
+                _summ_event = st.dataframe(_df_table, use_container_width=True, height=420,
+                                           hide_index=True, column_config=_summary_config, key=_summary_table_key,
                                            on_select="rerun", selection_mode="single-row")
 
             # 행 클릭 → 관리도 표시
@@ -3680,24 +4309,29 @@ with tab_summ:
                     _sel_var_name = _df_show.iloc[_sel_rows[0]]['변수']
                     _sel_it = next((x for x in results if str(x['column']) == str(_sel_var_name)), None)
                     if _sel_it:
-                        st.markdown(f"---\n#### 📉 관리도 — **{_sel_var_name}**")
-                        _m1, _m2, _m3, _m4, _m5, _m6 = st.columns(6)
-                        _m1.metric("Cpk", fmt_value(_sel_it['cpk']))
-                        _m2.metric("Ppk", fmt_value(_sel_it['ppk']))
-                        _m3.metric("Cpm", fmt_value(_sel_it.get('cpm', np.nan)))
-                        _m4.metric("Cpmk", fmt_value(_sel_it.get('cpmk', np.nan)))
-                        _m5.metric("규격 이탈", f"{_sel_it['spec_violation_count']}건")
-                        _m6.metric("관리 이탈", f"{_get_ctrl_total(_sel_it)}건")
-                        _render_date_label_status(_sel_it)
-                        _render_control_chart_scrollable(
-                            _sel_it,
-                            view_key="summary",
-                            palette=palette,
-                            ksq_toggles=st.session_state['ksq_toggles'],
-                            show_zones=st.session_state['show_zones'],
-                        )
-                        if st.button("🔍 확대 보기", key="summ_zoom_ctrl"):
-                            _show_chart_modal(_sel_it, "control")
+                        with st.expander(f"선택 항목 상세 — {_sel_var_name}"):
+                            _selected_detail = _df_show.iloc[_sel_rows[0]].rename_axis('항목').reset_index(name='값')
+                            _selected_detail['값'] = _selected_detail['값'].map(str)
+                            st.dataframe(_selected_detail, hide_index=True, use_container_width=True)
+                        if not _extended_result:
+                            st.markdown(f"---\n#### 📉 관리도 — **{_sel_var_name}**")
+                            _m1, _m2, _m3, _m4, _m5, _m6 = st.columns(6)
+                            _m1.metric("Cpk", fmt_value(_sel_it['cpk']))
+                            _m2.metric("Ppk", fmt_value(_sel_it['ppk']))
+                            _m3.metric("Cpm", fmt_value(_sel_it.get('cpm', np.nan)))
+                            _m4.metric("Cpmk", fmt_value(_sel_it.get('cpmk', np.nan)))
+                            _m5.metric("규격 이탈", f"{_sel_it['spec_violation_count']}건")
+                            _m6.metric("관리 이탈", f"{_get_ctrl_total(_sel_it)}건")
+                            _render_date_label_status(_sel_it)
+                            _render_control_chart_scrollable(
+                                _sel_it,
+                                view_key="summary",
+                                palette=palette,
+                                ksq_toggles=st.session_state['ksq_toggles'],
+                                show_zones=st.session_state['show_zones'],
+                            )
+                            if st.button("🔍 확대 보기", key="summ_zoom_ctrl"):
+                                _show_chart_modal(_sel_it, "control")
                 except Exception:
                     pass
 
@@ -3719,9 +4353,14 @@ with tab_stab:
         st.subheader("공정 능력 · 변동 평가")
         st.caption("전체 성능 참고값과 군내·전체 변동 차이를 함께 확인합니다. 공정 안정성은 관리도 결과와 함께 판단하세요.")
         limit_col, ratio_col, view_col = st.columns([1, 1, 2])
+        auto_stability = any(it.get('capability_criteria', {}).get('mode') == 'aiag_vda' for it in results)
         with limit_col:
-            stab_ppk = st.number_input("Ppk 충족 기준", min_value=0.1, value=_required_limit(),
-                                       step=0.01, key="stab_ppk_limit")
+            if auto_stability:
+                st.caption('Ppk 기준: 항목별 자동 요구값 적용')
+                stab_ppk = None
+            else:
+                stab_ppk = st.number_input("Ppk 충족 기준", min_value=0.1, value=_required_limit(),
+                                           step=0.01, key="stab_ppk_limit")
         with ratio_col:
             stab_ratio = st.number_input("변동 비율 구분 기준", min_value=1.01, value=1.25,
                                          step=0.01, key="stab_ratio_limit")
@@ -3730,13 +4369,13 @@ with tab_stab:
                                  horizontal=True, key="stab_view")
         opt1, opt2 = st.columns(2)
         stab_labels = opt1.checkbox("항목명 표시", value=False, key="stab_labels")
-        stab_contour = opt2.checkbox("Cwk = 1 등고선 표시", value=False, key="stab_contour")
+        stab_contour = opt2.checkbox("Cwk = 1 등고선 표시", value=False, key="stab_contour", disabled=auto_stability)
         st.caption(_threshold_text("기본 구분값: Ppk 1.33 / 비율 1.25 · 사내·고객 기준에 맞게 조정하세요. 비율 기준은 안정성 검정의 임계값이 아닙니다."))
         try:
             stab_rows = stability_assessment(results, stab_ppk, stab_ratio)
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("평가 항목", f"{len(stab_rows)}개")
-            m2.metric("Ppk 참고 기준 미달", f"{sum(r['ppk'] < stab_ppk for r in stab_rows)}개")
+            m2.metric("Ppk 참고 기준 미달", f"{sum(r['ppk'] < r['required'] for r in stab_rows)}개")
             m3.metric("변동 차이 확인 필요", f"{sum(r['ratio'] > stab_ratio for r in stab_rows)}개")
             m4.metric("평가 제외", f"{len(results) - len(stab_rows)}개")
             if stab_rows:
@@ -3770,45 +4409,7 @@ with tab_ctrl:
         st.divider()
 
         # 변수 선택 UI
-        nav_c1, nav_c2, nav_c3 = st.columns([1, 6, 1])
-        _vi = st.session_state.get('detail_var_idx', 0)
-        if not isinstance(_vi, int):
-            _vi = 0
-        _vi = max(0, min(_vi, n_cols - 1))
-        _sel = st.session_state.get('detail_var_sel', _vi)
-        if not isinstance(_sel, int):
-            _sel = _vi
-        _sel = max(0, min(_sel, n_cols - 1))
-        st.session_state['detail_var_idx'] = _vi
-        st.session_state['detail_var_sel'] = _sel
-        with nav_c1:
-            if st.button("◀ 이전", use_container_width=True, disabled=(_vi == 0)):
-                _new = _vi - 1
-                st.session_state['detail_var_idx'] = _new
-                st.session_state['detail_var_sel'] = _new
-                st.rerun()
-        with nav_c3:
-            if st.button("다음 ▶", use_container_width=True, disabled=(_vi == n_cols - 1)):
-                _new = _vi + 1
-                st.session_state['detail_var_idx'] = _new
-                st.session_state['detail_var_sel'] = _new
-                st.rerun()
-        with nav_c2:
-            sel_var = st.selectbox("변수 선택", options=range(n_cols),
-                                   index=_sel, format_func=lambda i: str(col_names[i]),
-                                   key="detail_var_sel", label_visibility="collapsed")
-            if not isinstance(sel_var, int):
-                sel_var = _sel
-            sel_var = max(0, min(sel_var, n_cols - 1))
-            if sel_var != _vi:
-                st.session_state['detail_var_idx'] = sel_var
-                _vi = sel_var
-
-        if not results or _vi < 0 or _vi >= len(results):
-            st.warning("표시할 분석 결과가 없습니다. 분석을 다시 실행해 주세요.")
-            st.stop()
-
-        it = results[_vi]
+        it, _vi = _select_detail_item(results)
         col_name = it['column']
         if it.get('data_layout_mode') == 'wide_subgroup_cols':
             _sg_cols = ", ".join(it.get('subgroup_columns', []))
@@ -3914,6 +4515,8 @@ with tab_ctrl:
         _r_lcl_applicable = not (_disp_kind == "R" and _n_subgroup <= 6)
         if it.get('distribution_mode') == 'nonnormal':
             _r_lcl_applicable = _n_subgroup > 1
+        if it.get('distribution_warning'):
+            st.warning(it['distribution_warning'])
         st.markdown(process_metric_cards_html(it), unsafe_allow_html=True)
         from spc_review_ui import render_result_review
         render_result_review(it, _save_config)
@@ -4097,354 +4700,6 @@ with tab_ctrl:
 - **목표치(T) 선 (있을 경우)**: 공정이 맞추고자 하는 목표 중심값입니다.
 """)
 
-    # 추가 차트 — expander
-        if st.checkbox("📈 히스토그램 / Q-Q 플롯 보기", key="show_distribution"):
-            distribution_range = st.radio("히스토그램 표시 범위", ["분포 확대", "규격 전체"], horizontal=True, key=f"distribution_range_{_vi}")
-            h_col, q_col = st.columns(2)
-            with h_col:
-                try:
-                    fig_hist = build_histogram(it, palette=palette, bins=st.session_state['hist_bins'],
-                                               range_mode='data' if distribution_range == '분포 확대' else 'spec')
-                    _fig_to_st(fig_hist)
-                    if st.button("🔍 확대", key=f"zoom_hist_{_vi}", use_container_width=True):
-                        _show_chart_modal(it, "hist", range_mode="data" if distribution_range == "분포 확대" else "spec")
-                except Exception as e:
-                    st.error(f"히스토그램 오류: {e}")
-            with q_col:
-                try:
-                    fig_qq = build_qq_plot(it, palette=palette)
-                    _fig_to_st(fig_qq)
-                    if st.button("🔍 확대", key=f"zoom_qq_{_vi}", use_container_width=True):
-                        _show_chart_modal(it, "qq")
-                except Exception as e:
-                    st.error(f"QQ 플롯 오류: {e}")
-
-        # 상세 통계
-        if st.checkbox("📊 상세 통계 보기", key="show_statistics"):
-            ppm_w, ppm_o, ppm_e = it.get('ppm_within', np.nan), it['ppm_ppk'], it['emp_ppm']
-            _is_xmr = bool(it.get('is_xmr', False))
-            _x_lab = "X" if _is_xmr else "Xbar"
-            _disp_kind = str(it.get('dispersion_kind', "MR" if _is_xmr else "R"))
-            _disp_kind_label = {
-                "R": "R(범위)",
-                "S": "S(표준편차)",
-                "MR": "MR(이동범위)",
-            }.get(_disp_kind, _disp_kind)
-            _disp_lcl_applicable = not (_disp_kind == "R" and int(it.get('n', 0)) <= 6)
-            if it.get('distribution_mode') == 'nonnormal':
-                _disp_lcl_applicable = int(it.get('n', 0)) > 1
-            _ksq_c = it.get('ksq_counts', {})
-            _norm_msg = str(it.get('norm_msg', '정규성 검정 결과 없음'))
-            _n_valid = int(np.isfinite(np.asarray(it.get('series', []), dtype=float)).sum())
-            _series_vals = np.asarray(it.get('series', []), dtype=float)
-            _series_vals = _series_vals[np.isfinite(_series_vals)]
-            _std_v = np.nan
-            if len(_series_vals):
-                _min_v = float(np.min(_series_vals))
-                _max_v = float(np.max(_series_vals))
-                _avg_v = float(np.mean(_series_vals))
-                _rng_v = _max_v - _min_v
-            else:
-                _min_v = np.nan
-                _max_v = np.nan
-                _avg_v = np.nan
-                _rng_v = np.nan
-            _ci95_lo = np.nan
-            _ci95_hi = np.nan
-            if len(_series_vals) >= 2 and np.isfinite(_avg_v):
-                _std_v = float(np.std(_series_vals, ddof=1))
-                if np.isfinite(_std_v) and _std_v >= 0:
-                    _se = _std_v / math.sqrt(len(_series_vals))
-                    try:
-                        _tcrit = float(stats.t.ppf(0.975, df=len(_series_vals) - 1))
-                    except Exception:
-                        _tcrit = 1.96
-                    if np.isfinite(_se) and np.isfinite(_tcrit):
-                        _half = _tcrit * _se
-                        _ci95_lo = _avg_v - _half
-                        _ci95_hi = _avg_v + _half
-
-            _med_v = np.nan
-            _q1_v = np.nan
-            _q3_v = np.nan
-            _iqr_v = np.nan
-            if len(_series_vals):
-                _med_v = float(np.median(_series_vals))
-                _q1_v = float(np.percentile(_series_vals, 25))
-                _q3_v = float(np.percentile(_series_vals, 75))
-                _iqr_v = _q3_v - _q1_v
-
-            _cv_pct = np.nan
-            if np.isfinite(_std_v) and np.isfinite(_avg_v) and _avg_v != 0:
-                _cv_pct = abs(_std_v / _avg_v) * 100.0
-
-            _target_v = float(it.get('target', np.nan))
-            _target_delta = np.nan
-            _target_delta_pct = np.nan
-            if np.isfinite(_avg_v) and np.isfinite(_target_v):
-                _target_delta = _avg_v - _target_v
-                if _target_v != 0:
-                    _target_delta_pct = (_target_delta / _target_v) * 100.0
-
-            _usl_v = float(it.get('usl', np.nan))
-            _lsl_v = float(it.get('lsl', np.nan))
-            _margin_usl = np.nan
-            _margin_lsl = np.nan
-            _margin_min = np.nan
-            if np.isfinite(_usl_v) and np.isfinite(_avg_v):
-                _margin_usl = _usl_v - _avg_v
-            if np.isfinite(_lsl_v) and np.isfinite(_avg_v):
-                _margin_lsl = _avg_v - _lsl_v
-            _margin_cands = [v for v in (_margin_usl, _margin_lsl) if np.isfinite(v)]
-            if _margin_cands:
-                _margin_min = float(min(_margin_cands))
-
-            _skew_v = np.nan
-            _kurt_v = np.nan
-            if len(_series_vals) >= 3:
-                try:
-                    _skew_v = float(stats.skew(_series_vals, nan_policy='omit', bias=False))
-                except Exception:
-                    _skew_v = np.nan
-            if len(_series_vals) >= 4:
-                try:
-                    _kurt_v = float(stats.kurtosis(_series_vals, nan_policy='omit', fisher=True, bias=False))
-                except Exception:
-                    _kurt_v = np.nan
-
-            def _cap_ci_approx(v, n_obs: int):
-                try:
-                    fv = float(v)
-                except Exception:
-                    return np.nan, np.nan
-                if (not np.isfinite(fv)) or n_obs < 2:
-                    return np.nan, np.nan
-                se = math.sqrt(max(0.0, (1.0 / (9.0 * n_obs)) + ((fv * fv) / (2.0 * max(1, n_obs - 1)))))
-                z = 1.96
-                return fv - z * se, fv + z * se
-
-            _cpk_ci_lo, _cpk_ci_hi = _cap_ci_approx(it.get('cpk', np.nan), len(_series_vals))
-            _ppk_ci_lo, _ppk_ci_hi = _cap_ci_approx(it.get('ppk', np.nan), len(_series_vals))
-            if it.get('distribution_mode') == 'nonnormal':
-                _cpk_ci_lo = _cpk_ci_hi = _ppk_ci_lo = _ppk_ci_hi = np.nan
-            if '만족' not in str(it.get('norm_msg', '')):
-                _ppk_ci_lo = _ppk_ci_hi = np.nan
-
-            def _margin_level(v) -> str:
-                try:
-                    fv = float(v)
-                except Exception:
-                    return "muted"
-                if not np.isfinite(fv):
-                    return "muted"
-                return "bad" if fv < 0 else "good"
-
-            def _num(v, d: int = 3) -> str:
-                try:
-                    fv = float(v)
-                except Exception:
-                    return "—"
-                return f"{fv:.{d}f}" if np.isfinite(fv) else "—"
-
-            def _ppm(v) -> str:
-                try:
-                    fv = float(v)
-                except Exception:
-                    return "—"
-                return f"{fv:,.0f}" if np.isfinite(fv) else "—"
-
-            def _cp_level(v) -> str:
-                try:
-                    fv = float(v)
-                    if not np.isfinite(fv):
-                        return "muted"
-                    if fv < _warning_limit():
-                        return "bad"
-                    if fv < _required_limit():
-                        return "warn"
-                    return "good"
-                except Exception:
-                    return "muted"
-
-            def _ppm_level(v) -> str:
-                try:
-                    fv = float(v)
-                except Exception:
-                    return "muted"
-                if not np.isfinite(fv):
-                    return "muted"
-                if fv > 50000:
-                    return "bad"
-                if fv > 10000:
-                    return "warn"
-                return "good"
-
-            def _kv_block(title: str, rows, extra_class: str = "") -> str:
-                _rows_html = []
-                for _row in rows:
-                    if len(_row) >= 3:
-                        k, v, cls = _row[0], _row[1], str(_row[2] or "")
-                    else:
-                        k, v = _row[0], _row[1]
-                        cls = ""
-                    if cls in {"good", "warn", "bad", "muted"}:
-                        v_html = f"<span class='stats-val stats-val-{cls}'>{v}</span>"
-                    else:
-                        v_html = str(v)
-                    _rows_html.append(f"<tr><td>{k}</td><td>{v_html}</td></tr>")
-                _rows = "".join(_rows_html)
-                _block_class = "stats-block"
-                if str(extra_class).strip():
-                    _block_class += f" {str(extra_class).strip()}"
-                return (
-                    f"<div class='{_block_class}'>"
-                    f"<div class='stats-title'>{title}</div>"
-                    f"<table class='stats-kv'>{_rows}</table>"
-                    f"</div>"
-                )
-
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
-            _kpis = [
-                ("Cpk", _num(it.get('cpk', np.nan)), "전체 변동 공정능력", _cp_level(it.get('cpk', np.nan))),
-                ("Ppk (참고)", _num(it.get('ppk', np.nan)), "선택 분포 모형", "muted"),
-                ("Cpm", _num(it.get('cpm', np.nan)), "목표치 반영", _cp_level(it.get('cpm', np.nan))),
-                ("Cpmk", _num(it.get('cpmk', np.nan)), "목표+치우침 반영", _cp_level(it.get('cpmk', np.nan))),
-                ("PPM(Overall)", _ppm(ppm_o), "100만개 기준", _ppm_level(ppm_o)),
-                ("유효 표본수", f"{_n_valid:,}", "결측 제외", "muted"),
-            ]
-            for _col, (_lbl, _val, _sub, _cls) in zip([k1, k2, k3, k4, k5, k6], _kpis):
-                _col.markdown(
-                    f"""
-                    <div class="stats-kpi stats-kpi-{_cls}">
-                        <div class="stats-kpi-label">{_lbl}</div>
-                        <div class="stats-kpi-value {_cls}">{_val}</div>
-                        <div class="stats-kpi-sub">{_sub}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-            d1, d2, d3, d4 = st.columns([1.0, 1.0, 1.0, 1.22])
-            _cpk_cls = _cp_level(it.get('cpk', np.nan))
-            _ppk_cls = _cp_level(it.get('ppk', np.nan))
-            _cpmk_cls = _cp_level(it.get('cpmk', np.nan))
-            _spec_rows = [
-                ("USL (원단위)" if it.get('box_cox_applied') else "USL", _num(it.get('original_usl' if it.get('box_cox_applied') else 'usl', np.nan)), "muted"),
-                ("LSL (원단위)" if it.get('box_cox_applied') else "LSL", _num(it.get('original_lsl' if it.get('box_cox_applied') else 'lsl', np.nan)), "muted"),
-                ("목표치(T)", _num(it.get('target', np.nan)), "muted"),
-                ("운영 모드", str(it.get('control_phase_label', '해석용')), "muted"),
-                ("Cp / Cpk", f"{_num(it.get('cp', np.nan))} / {_num(it.get('cpk', np.nan))}", _cpk_cls),
-                ("Cw / Cwk (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cw / Cwk (진단용)", f"{_num(it.get('cw', np.nan))} / {_num(it.get('cwk', np.nan))}", "muted"),
-                ("Pp / Ppk", f"{_num(it.get('pp', np.nan))} / {_num(it.get('ppk', np.nan))}", _ppk_cls),
-                ("Cpm / Cpmk", f"{_num(it.get('cpm', np.nan))} / {_num(it.get('cpmk', np.nan))}", _cpmk_cls),
-            ]
-            _spec_v = int(it.get('spec_violation_count', 0))
-            _x_v, _r_v = _get_ctrl_counts(it)
-            _ppm_rows = [
-                ("PPM(Within)", _ppm(ppm_w), _ppm_level(ppm_w)),
-                ("PPM(Overall)", _ppm(ppm_o), _ppm_level(ppm_o)),
-                ("PPM(실측)", _ppm(ppm_e), _ppm_level(ppm_e)),
-                ("규격 이탈", f"{_spec_v:,} 건", "bad" if _spec_v > 0 else "good"),
-                (f"{_x_lab} 이탈", f"{_x_v:,} 건", "bad" if _x_v > 0 else "good"),
-                (f"{_disp_kind_label} 이탈", f"{_r_v:,} 건", "bad" if _r_v > 0 else "good"),
-            ]
-            _ctrl_rows = [
-                ("한계 기준", str(it.get('limit_reference_label', '전체 데이터')), "muted"),
-                (f"{_x_lab}-CL", _num(it.get('xbarbar', np.nan)), "muted"),
-                (f"{_x_lab}-UCL", _num(it.get('ucl', np.nan)), "muted"),
-                (f"{_x_lab}-LCL", _num(it.get('lcl', np.nan)), "muted"),
-                (f"{_disp_kind_label}-CL", _num(it.get('r_bar', np.nan)), "muted"),
-                (f"{_disp_kind_label}-UCL", _num(it.get('r_ucl', np.nan)), "muted"),
-            ]
-            if _disp_lcl_applicable:
-                _ctrl_rows.append((f"{_disp_kind_label}-LCL", _num(it.get('r_lcl', np.nan)), "muted"))
-            _basic_rows_core = [
-                ("최소", _num(_min_v), "muted"),
-                ("최대", _num(_max_v), "muted"),
-                ("평균(μ)", _num(_avg_v), "muted"),
-                ("중앙값(Median)", _num(_med_v), "muted"),
-                ("Q1 / Q3", f"{_num(_q1_v)} / {_num(_q3_v)}", "muted"),
-                ("IQR(Q3-Q1)", _num(_iqr_v), "muted"),
-                ("범위", _num(_rng_v), "muted"),
-                ("95% CI 하한(μ)", _num(_ci95_lo), "muted"),
-                ("95% CI 상한(μ)", _num(_ci95_hi), "muted"),
-            ]
-            _aux_rows_var_target = [
-                ("변동계수 CV(%)", _num(_cv_pct, 2), "muted"),
-                ("목표치 편차(μ-T)", _num(_target_delta), "muted"),
-                ("편차율(%)", _num(_target_delta_pct, 2), "muted"),
-            ]
-            _aux_rows_margin = [
-                ("규격여유 USL-μ", _num(_margin_usl), _margin_level(_margin_usl)),
-                ("규격여유 μ-LSL", _num(_margin_lsl), _margin_level(_margin_lsl)),
-                ("최소 규격여유", _num(_margin_min), _margin_level(_margin_min)),
-            ]
-            _aux_rows_shape_ci = [
-                ("왜도(Skewness)", _num(_skew_v), "muted"),
-                ("첨도(Kurtosis)", _num(_kurt_v), "muted"),
-                ("Cpk 95% CI(근사)", f"{_num(_cpk_ci_lo)} ~ {_num(_cpk_ci_hi)}", _cp_level(it.get('cpk', np.nan))),
-                ("Ppk 95% CI(근사)", f"{_num(_ppk_ci_lo)} ~ {_num(_ppk_ci_hi)}", _cp_level(it.get('ppk', np.nan))),
-            ]
-            with d1:
-                st.markdown(_kv_block("규격 및 능력 지수", _spec_rows), unsafe_allow_html=True)
-            with d2:
-                st.markdown(_kv_block("불량률 및 이탈 집계", _ppm_rows), unsafe_allow_html=True)
-            with d3:
-                st.markdown(_kv_block("관리한계선 파라미터", _ctrl_rows), unsafe_allow_html=True)
-            with d4:
-                st.markdown(_kv_block("기초 통계량", _basic_rows_core), unsafe_allow_html=True)
-
-            a1, a2, a3 = st.columns([1.0, 1.0, 1.20])
-            with a1:
-                st.markdown(_kv_block("변동/목표 편차", _aux_rows_var_target, "stats-block-compact"), unsafe_allow_html=True)
-            with a2:
-                st.markdown(_kv_block("규격 여유", _aux_rows_margin, "stats-block-compact"), unsafe_allow_html=True)
-            with a3:
-                st.markdown(_kv_block("분포 형상/능력 CI", _aux_rows_shape_ci, "stats-block-compact"), unsafe_allow_html=True)
-
-            _ksq_total = sum(int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9))
-            _ksq_df = pd.DataFrame([{f'T{j}': int(_ksq_c.get(f'T{j}', 0)) for j in range(1, 9)}], index=["위반 건수"])
-            if it.get('distribution_mode') == 'nonnormal':
-                st.caption(it.get('pearson_rules_note', ''))
-                _ksq_df = _ksq_df[['T1']]
-            st.markdown("**관리한계 이탈 진단 (T1)**" if it.get('distribution_mode') == 'nonnormal' else "**KSQ 규칙 진단 매트릭스 (T1~T8)**")
-            try:
-                _ksq_styled = _ksq_df.style.applymap(
-                    lambda v: (
-                        "background-color: rgba(220,38,38,0.16); color:#991b1b; font-weight:700;"
-                        if int(v) > 0 else
-                        "background-color: rgba(16,185,129,0.10); color:#065f46; font-weight:600;"
-                    )
-                )
-                st.dataframe(_ksq_styled, use_container_width=True)
-            except Exception:
-                st.dataframe(_ksq_df, use_container_width=True)
-
-            if _ksq_total == 0:
-                _ksq_cls = "good"
-                _ksq_txt = "KSQ 규칙 위반 없음"
-            else:
-                _ksq_cls = "bad"
-                _ksq_txt = f"KSQ 규칙 위반 {int(_ksq_total)}건 감지"
-            st.markdown(
-                f"<div class='stats-note {_ksq_cls}'><b>규칙 판정:</b> {_ksq_txt}</div>",
-                unsafe_allow_html=True,
-            )
-
-            if "만족" in _norm_msg:
-                _norm_cls = "good"
-                _norm_txt = "정규성 가정에 대체로 부합"
-            elif "의심" in _norm_msg:
-                _norm_cls = "bad"
-                _norm_txt = "정규성 이탈 가능성 높음"
-            else:
-                _norm_cls = "warn"
-                _norm_txt = "정규성 판정 정보 확인 필요"
-            st.markdown(
-                f"<div class='stats-note {_norm_cls}'><b>정규성 검정:</b> {_norm_txt} · {_norm_msg}</div>",
-                unsafe_allow_html=True,
-            )
-
         with st.expander("📋 원시 데이터 미리보기 (최근 500행)", expanded=False):
             _raw_series = pd.Series(it['series'], name=col_name).reset_index(drop=True)
             _raw_series.index = _raw_series.index + 1  # 1-based
@@ -4462,9 +4717,9 @@ with tab_ctrl:
                 except Exception:
                     return ''
                 if (np.isfinite(_usl) and v > _usl) or (np.isfinite(_lsl) and v < _lsl):
-                    return 'background-color: rgba(220,38,38,0.55); color:#ff9999; font-weight:bold'
+                    return STATUS_CELL_STYLES['bad']
                 if (np.isfinite(_ucl) and v > _ucl) or (np.isfinite(_lcl) and v < _lcl):
-                    return 'background-color: rgba(217,119,6,0.50); color:#ffe066; font-weight:bold'
+                    return STATUS_CELL_STYLES['warn']
                 return ''
 
             try:
@@ -4551,10 +4806,18 @@ with tab_export:
             html_charts = st.checkbox("관리도 차트 포함", value=True, key="html_include_charts")
             html_histogram = st.checkbox("히스토그램 포함", value=True, key="html_include_histogram")
             html_qq = st.checkbox("Q-Q 플롯 포함", value=False, key="html_include_qq")
-            if st.button("🌐 HTML 생성"):
+            html_qr_url = st.text_input("QR 공유 주소 (선택)", key="html_qr_url",
+                                        help="공유 주소를 입력하면 QR을 스캔해 해당 주소를 열 수 있습니다. 비우면 보고서 식별 정보가 표시됩니다.")
+            public_report_dir = os.getenv('SPC_PUBLIC_REPORT_DIR', '').strip()
+            public_base_url = os.getenv('SPC_PUBLIC_REPORT_BASE_URL', '').strip()
+            create_html = st.button("🌐 HTML 생성")
+            publish_html = False
+            if public_report_dir and public_base_url:
+                publish_html = st.button("HTML 생성 및 게시", help="게시한 보고서는 링크를 가진 누구나 열 수 있습니다.")
+            if create_html or publish_html:
                 with st.spinner("HTML 생성 중..."):
                     try:
-                        html_bytes = export_analysis_html(
+                        html_options = dict(
                             results=results,
                             summary_df=summary_df,
                             analysis_meta=st.session_state.get('analysis_meta', {}),
@@ -4566,26 +4829,38 @@ with tab_export:
                             include_histogram=html_histogram,
                             include_qq=html_qq,
                         )
+                        if publish_html:
+                            public_url, html_bytes = publish_analysis_html(public_report_dir, public_base_url, **html_options)
+                            st.link_button("공개 보고서 열기", public_url)
+                            st.code(public_url, language=None)
+                        else:
+                            html_bytes = export_analysis_html(**html_options, qr_share_url=html_qr_url)
                         st.download_button(
                             "📥 HTML 다운로드",
                             data=html_bytes,
                             file_name="spc_분석결과.html",
                             mime="text/html",
-                            key="dl_html_final",
+                            key="dl_html_final", on_click="ignore",
                         )
-                        st.success("HTML 생성 완료!")
+                        st.success("HTML 게시 완료!" if publish_html else "HTML 생성 완료!")
                     except Exception as e:
                         st.error(f"HTML 생성 실패: {e}")
 
         st.divider()
         st.markdown("### 📸 개별 차트 PNG 다운로드")
         sel_col   = st.selectbox("변수 선택", col_names, key="png_col_sel")
-        sel_chart = st.selectbox("차트 종류", ["개요(2×2)", "관리도(상세)", "히스토그램", "Q-Q 플롯"], key="png_chart_sel")
+        _chart_options = [EXTENDED_TITLE] if _extended_result else ["개요(2×2)", "관리도(상세)"]
+        sel_chart = st.selectbox("차트 종류", [*_chart_options, "히스토그램", "Q-Q 플롯"], key="png_chart_sel")
         if st.button("PNG 생성"):
             it_sel = next((x for x in results if x['column'] == sel_col), None)
             if it_sel:
                 try:
-                    if sel_chart == "개요(2×2)":
+                    if sel_chart == EXTENDED_TITLE:
+                        extended = it_sel.get('extended_shewhart')
+                        if extended is None:
+                            raise ValueError(it_sel.get('extended_shewhart_error', '확장 관리도 설정을 확인하세요.'))
+                        fig_dl = build_extended_figure(extended, palette=palette)
+                    elif sel_chart == "개요(2×2)":
                         fig_dl = build_overview_2x2(it_sel, palette=palette, hist_bins=st.session_state['hist_bins'], ksq_toggles=st.session_state['ksq_toggles'], show_zones=st.session_state['show_zones'])
                     elif sel_chart == "관리도(상세)":
                         fig_dl = build_control_chart(it_sel, palette=palette, ksq_toggles=st.session_state['ksq_toggles'], show_zones=st.session_state['show_zones'])
@@ -4604,7 +4879,7 @@ with tab_export:
     # ─────────────────────────── 푸터 ───────────────────────────
 st.markdown("---")
 st.markdown(
-    "<div style='text-align:center; color:#94a3b8; font-size:0.8rem;'>"
+    "<div style='text-align:center; color:var(--text-color,#475569); font-size:0.85rem;'>"
     "SPC Studio · 계량형 | Streamlit 기반 | 원본: 공정능력_관리도_Rev26.py"
     "</div>",
     unsafe_allow_html=True,

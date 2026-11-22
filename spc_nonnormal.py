@@ -117,16 +117,20 @@ def location_reference_values(it):
     return values if int(it['n']) == 1 else values.reshape(-1, int(it['n'])).mean(axis=1)
 
 
+MIN_DIAGNOSIS_VALUES = 50
+MIN_DIAGNOSIS_GROUPS = 20
+
+
 def check_location_sample(values, n):
-    minimum = 50 if n == 1 else 20
+    minimum = MIN_DIAGNOSIS_VALUES if n == 1 else MIN_DIAGNOSIS_GROUPS
     if len(values) < minimum or not np.isfinite(values).all() or np.ptp(values) <= 0:
         raise ValueError(f'위치 관리도 분포 적합에는 유효 {"개별값 50" if n == 1 else "부분군 평균 20"}개 이상과 양의 산포가 필요합니다.')
 
 
 def check_sample(values, n):
-    if len(values) < 50:
+    if len(values) < MIN_DIAGNOSIS_VALUES:
         raise ValueError('비정규 적합에는 유효 측정값 50개 이상이 필요합니다.')
-    if n > 1 and len(values) // n < 20:
+    if n > 1 and len(values) // n < MIN_DIAGNOSIS_GROUPS:
         raise ValueError('비정규 관리도에는 완전 부분군 20개 이상이 필요합니다.')
     if not np.isfinite(values).all() or np.ptp(values) <= 0:
         raise ValueError('유효한 유한 측정값과 0보다 큰 산포가 필요합니다.')
@@ -364,7 +368,7 @@ def apply_analysis(result, config):
     it['ksq_counts_baseline'] = dict(it['ksq_counts'])
     it['ksq_counts_monitor'] = dict(it['ksq_counts'])
     try:
-        if not cfg['family'] or not cfg['chart_family'] or cfg['confirmed_digest'] != fingerprint(it, cfg['natural_lower']):
+        if not cfg['chart_family'] or cfg['confirmed_digest'] != fingerprint(it, cfg['natural_lower']):
             raise ValueError('분포 선택·확인 필요: 데이터·부분군·규격·기준구간 변경 후에는 다시 확인하세요.')
         reference = reference_values(it)
         location = location_reference_values(it)
@@ -376,9 +380,9 @@ def apply_analysis(result, config):
         it['chart_model'] = chart_model
         if not chart_model['eligible']:
             raise ValueError('기준분포 부적합: ' + chart_model['reason'])
-        it['chart_fit_status'] = '적합도 기준 통과'
         limits = pearson_limits(chart_model, int(it['n']))
         it.update(limits)
+        it['chart_fit_status'] = '적합도 기준 통과'
         it['chart_mode'] = 'Pearson I (MR 참고)' if it['n'] == 1 else f'Pearson Xbar / Shewhart {it["dispersion_kind"]}'
         it['limit_reference_desc'] += f' · {chart_model["name"]} 위치 분포 직접 적합 · 0.135%/99.865% 분위수'
         it['xbarbar'] = float(np.mean(reference))
@@ -405,15 +409,15 @@ def apply_analysis(result, config):
         it['baseline_reasons'] = ['기준구간 관리이탈: 원인 조사 전 관리한계는 잠정값'] if baseline_bad else []
         it['recent_ctrl_violation'] = int(it['means'][-1] > it['ucl'] or it['means'][-1] < it['lcl']
                                            or (it['n'] > 1 and (it['ranges'][-1] > it['r_ucl'] or it['ranges'][-1] < it['r_lcl'])))
-        if cfg['performance_digest'] != performance_fingerprint(it, cfg['natural_lower']):
+        if not cfg['family'] or cfg['performance_digest'] != performance_fingerprint(it, cfg['natural_lower']):
             raise ValueError('전체 데이터 분포 선택·확인 필요: 성능 분포를 다시 진단·확인하세요.')
         performance_model = fit_checked(values, cfg['family'], cfg['natural_lower'])
         performance_model['fit_target'] = 'individual'
         it['distribution_model'] = performance_model
         if not performance_model['eligible']:
             raise ValueError('전체 성능분포 부적합: ' + performance_model['reason'])
-        it['performance_fit_status'] = '적합도 기준 통과'
         capability = capability_indices(frozen_model(performance_model), it['usl'], it['lsl'])
+        it['performance_fit_status'] = '적합도 기준 통과'
         it['capability_quantiles'] = capability['quantiles']
         it['numeric_status'] = capability['numeric_status']
         it['ppm_ppk'] = capability['ppm']
@@ -445,5 +449,6 @@ def apply_analysis(result, config):
             it['r_ucl'] = it['r_lcl'] = np.nan
         else:
             it['performance_fit_status'] = message
+            it['performance_note'] = '능력·성능 지수는 전체 개별 측정값 분포를 확인하면 계산됩니다.'
     it['reliability_reason_text'] = ', '.join(it['reliability_reasons'])
     return it

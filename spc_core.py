@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from spc_policy import normalize_assessment, finalize_assessment, exclusion_digest, approved_mask, band, limits
+from spc_extended import EXTENDED_MODE
 from typing import Optional, Tuple, Dict, List, Any
 
 # ===== 관리계수 표 (n: 2~25) =====
@@ -48,14 +49,14 @@ _d2_mr = 1.128  # I-MR에서 MRbar→σ 변환
 NORMALITY_MAX = 10000
 NORMALITY_SW_CUTOFF = 50  # n<=50: Shapiro-Wilk, 초과: Anderson-Darling
 
-CALCULATION_VERSION = "2026.11.17.6"
+CALCULATION_VERSION = "2026.11.20.3"
 WITHIN_CAPABILITY_NOTICE = (
     "Cw·Cwk는 군내 변동에 기반한 공정 진단 지수입니다. "
     "이 지수만으로 공정 전체의 능력 충족을 판정하거나 입증하지 않습니다. "
     "합리적 부분군과 군내 정규성을 가정합니다. Cp·Cpk와 Pp·Ppk는 전체 변동을 사용하며, "
     "Cp·Cpk는 관측 구간의 적용 조건이 충족될 때만 표시합니다. "
     "Cwk/Ppk 비율만으로 공정 안정성을 확정할 수 없습니다."
-    " n=1의 Cw·Cwk는 연속 유효값의 MR̄/1.128에 기반한 앱의 진단용 참고값이며 실제 부분군 내 산포와 구분합니다."
+    " n=1의 Cw·Cwk는 원본에서 인접한 유효 관측값의 MR̄/1.128에 기반한 앱의 진단용 참고값이며 실제 부분군 내 산포와 구분합니다."
 )
 OUTLIER_METHOD_IQR = "iqr"
 OUTLIER_METHOD_QUANTILE = "quantile"
@@ -102,7 +103,7 @@ def analysis_options(state) -> Dict[str, Any]:
     defaults = dict(n=5, include_incomplete=False, data_layout_mode="long",
                     subgroup_columns=[], subgroup_var_name="측정치", measurement_date_column="",
                     ksq_toggles=None, chart_usage_mode="phase1", baseline_subgroups=25,
-                    preprocess_outliers=False, box_cox_transform=False)
+                    preprocess_outliers=False, box_cox_transform=False, selected_control_chart=None)
     options = {key: state.get(key, default) for key, default in defaults.items()}
     options["outlier_method"] = normalize_outlier_method(state.get("outlier_method", OUTLIER_METHOD_IQR))
     options["distribution_settings"] = state.get("distribution_settings", {})
@@ -122,6 +123,15 @@ def assess_process(it: Dict[str, Any]) -> Dict[str, str]:
                 or it.get("sequence_review", {}).get("count", 0) > 0)
     if unstable:
         return dict(level="high", text="🔴 공정 안정성 검토 필요", action="관리이탈·규칙 위반의 발생 시점과 작업 조건을 확인하세요. 능력 지수만으로 정상 운영을 판정하지 않습니다.")
+    criteria = it.get('capability_criteria', {})
+    if criteria.get('mode') == 'aiag_vda':
+        from spc_policy import criteria_description, criteria_status_text
+        state = criteria.get('status', 'hold')
+        if state == 'met' and (it.get('reliability_status') in ('검토필요', '주의') or criteria.get('warnings')):
+            return dict(level='medium', text='기준 충족 · 분석 조건 주의',
+                        action=criteria_description(it)+' · '+it.get('reliability_reason_text', ''))
+        return dict(level={'hold':'medium', 'below':'high', 'conditional':'medium', 'met':'low'}[state],
+                    text=criteria_status_text(criteria), action=criteria_description(it))
     if it.get("reliability_status") in ("검토필요", "주의"):
         return dict(level="medium", text="🟡 분석 조건 검토 필요", action="정규성·규격·전처리 및 제외 데이터 사유를 먼저 확인하세요.")
     if it.get("capability_status") and it.get("capability_status") != "적용 가능":
@@ -222,10 +232,9 @@ def normality_message(arr: np.ndarray, alpha: float = 0.05) -> str:
 
 
 def qq_stats_text(arr: np.ndarray) -> str:
-    from spc_normality import normality_diagnostics, pvalue_text
+    from spc_normality import normality_diagnostics, shape_text
     record = normality_diagnostics(arr)
-    shape = [str(record.get(key)) for key in ('skewness', 'excess_kurtosis')]
-    return f"왜도 {shape[0]} / 초과첨도 {shape[1]}\n{record['message']}"
+    return f"왜도 {shape_text(record.get('skewness'))} / 첨도 {shape_text(record.get('kurtosis'))}\n{record['message']}"
 
 
 def detect_ksq_rules(
@@ -237,15 +246,20 @@ def detect_ksq_rules(
     sigma_override: Optional[float] = None,
     ucl: Optional[float] = None,
     lcl: Optional[float] = None,
-    t1_by_manual: bool = False
+    t1_by_manual: bool = False,
+    adjacent: Optional[np.ndarray] = None,
+    mark_completion: bool = False,
 ) -> Dict[str, Any]:
     """
     KS Q ISO 7870-2 T1~T8 규칙 검출.
-    반환: {'counts': {T1..T8: int}, 'idx': {T1..T8: set}}
+    관리용 분석에서는 완료 시점만 표시할 수 있다.
     """
     vals = np.asarray(means, dtype=float)
     idxs = {f'T{i}': set() for i in range(1, 9)}
-    counts = {f'T{i}': 0 for i in range(1, 9)}
+    manual_limits = (t1_by_manual and ucl is not None and lcl is not None
+                     and np.isfinite(ucl) and np.isfinite(lcl))
+    if manual_limits:
+        idxs['T1'].update(np.flatnonzero((vals > ucl) | (vals < lcl)).tolist())
 
     if sigma_override is not None and np.isfinite(sigma_override) and sigma_override > 0:
         sigma = float(sigma_override)
@@ -256,7 +270,7 @@ def detect_ksq_rules(
             sigma = (A2 * r_bar) / 3.0 if (np.isfinite(A2) and np.isfinite(r_bar)) else np.nan
 
     if not np.isfinite(sigma) or sigma <= 0 or len(vals) < 2:
-        return {'counts': counts, 'idx': idxs}
+        return {'counts': {key: len(points) for key, points in idxs.items()}, 'idx': idxs}
 
     dev = vals - cl
     eps = sigma * 1e-6
@@ -264,11 +278,8 @@ def detect_ksq_rules(
     sgn = np.sign(dev_adj)
 
     # T1: 3σ 초과
-    if t1_by_manual and ucl is not None and lcl is not None and np.isfinite(ucl) and np.isfinite(lcl):
-        t1 = np.where((vals > ucl) | (vals < lcl))[0]
-    else:
-        t1 = np.where(np.abs(dev) > 3 * sigma)[0]
-    idxs['T1'].update(t1.tolist())
+    if not manual_limits:
+        idxs['T1'].update(np.flatnonzero(np.abs(dev) > 3 * sigma).tolist())
 
     # Rolling counts and interval unions avoid Python loops over every window.
     def rolling(mask, width):
@@ -281,8 +292,19 @@ def detect_ksq_rules(
         np.add.at(delta, starts + width, -1)
         return np.cumsum(delta[:-1]) > 0
 
+    gap_prefix = (np.r_[0, np.cumsum(~adjacent, dtype=np.int64)]
+                  if adjacent is not None and not np.all(adjacent) else None)
+
     def mark(rule, hits, width, matching=None):
-        mask = covered(np.flatnonzero(hits), width)
+        starts = np.flatnonzero(hits)
+        ends = starts + width - 1
+        if gap_prefix is not None:
+            continuous = gap_prefix[ends] == gap_prefix[starts]
+            starts, ends = starts[continuous], ends[continuous]
+        if mark_completion:
+            idxs[rule].update(ends.tolist())
+            return
+        mask = covered(starts, width)
         if matching is not None:
             mask &= matching
         idxs[rule].update(np.flatnonzero(mask).tolist())
@@ -306,9 +328,7 @@ def detect_ksq_rules(
                 & (rolling(dev > 0, 8) > 0) & (rolling(dev < 0, 8) > 0))
         mark('T8', hits, 8)
 
-    for k in idxs:
-        counts[k] = len(idxs[k])
-    return {'counts': counts, 'idx': idxs}
+    return {'counts': {key: len(points) for key, points in idxs.items()}, 'idx': idxs}
 
 
 def fmt_value(v, decimals: int = 3, comma: bool = False) -> str:
@@ -321,6 +341,58 @@ def fmt_value(v, decimals: int = 3, comma: bool = False) -> str:
         return f"{v:.{decimals}f}"
     except Exception:
         return str(v)
+
+
+def screening_index_pair(it):
+    """Choose display indices using existing eligibility; never recalculate results."""
+    it = it or {}
+    status = it.get('capability_status')
+    eligible = status == '적용 가능'
+    metrics = ('cp', 'cpk') if eligible else ('pp', 'ppk')
+    available = any(it.get(key) is not None and np.isfinite(it[key]) for key in metrics)
+    if status == '계산불가' or not available:
+        state = '계산 불가'
+        metrics = (None, None)
+    elif eligible:
+        state = '공정능력 평가'
+    elif status == '관리상태 확인':
+        state = '공정불안정 · 관측 성능 참고'
+    elif status == '미평가':
+        state = '상세 평가 필요 · 관측 성능 참고'
+    else:
+        state = '분석 조건 확인 필요 · 관측 성능 참고'
+    from spc_policy import reference_only_decision, REFERENCE_COMPARISON_LABEL
+    decision = it.get('capability_criteria', {}).get('indices', {}).get(metrics[1], {})
+    if reference_only_decision(decision):
+        state += ' · ' + REFERENCE_COMPARISON_LABEL
+    suffix = '.' + it.get('capability_method', 'G') if it.get('distribution_mode') == 'nonnormal' or it.get('box_cox_applied') else ''
+    def text(key):
+        return f"{key.capitalize()}{suffix} {fmt_value(it.get(key))}" if key else '—'
+    return dict(state=state, width=text(metrics[0]), shifted=text(metrics[1]),
+                width_metric=metrics[0], shifted_metric=metrics[1])
+
+
+def screening_index_band(it):
+    metric = screening_index_pair(it)['shifted_metric']
+    if metric is None:
+        return 'na'
+    state = band(it.get(metric), it, metric)
+    decision = it.get('capability_criteria', {}).get('indices', {}).get(metric, {})
+    return 'warn' if state != 'na' and decision.get('status') == 'conditional' else state
+
+
+def mean_confidence_interval(mean: float, sample_std: float, sample_size: int) -> Tuple[float, float]:
+    """Return the two-sided 95% Student t interval for the mean."""
+    if sample_size < 2 or not np.isfinite(mean) or not np.isfinite(sample_std) or sample_std < 0:
+        return np.nan, np.nan
+    try:
+        critical = float(stats.t.ppf(0.975, df=sample_size - 1))
+    except Exception:
+        critical = 1.96
+    half_width = sample_std / math.sqrt(sample_size) * critical
+    if not np.isfinite(half_width):
+        return np.nan, np.nan
+    return mean - half_width, mean + half_width
 
 
 def fmt_ppm(v) -> str:
@@ -407,6 +479,16 @@ def ppm_by_sigma(mu: float, sig: float, usl: float, lsl: float) -> float:
     p_lo = stats.norm.cdf((lsl - mu) / sig) if np.isfinite(lsl) else 0.0
     p_hi = stats.norm.sf((usl - mu) / sig) if np.isfinite(usl) else 0.0
     return (p_lo + p_hi) * 1e6
+
+
+def complete_subgroup_mask(mask: np.ndarray, n: int) -> np.ndarray:
+    """Keep valid observations in complete subgroups without moving row boundaries."""
+    if n == 1:
+        return mask.copy()
+    length = len(mask) // n * n
+    kept = np.zeros(len(mask), dtype=bool)
+    kept[:length] = np.repeat(mask[:length].reshape(-1, n).all(axis=1), n)
+    return kept
 
 
 def _build_subgroup_series(
@@ -636,6 +718,7 @@ def analyze_column(
     detail_level: str = "full",
     distribution_config: Optional[Dict[str, Any]] = None,
     assessment_settings: Optional[Dict[str, Any]] = None,
+    selected_control_chart: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     단일 컬럼에 대한 SPC + 공정능력 전체 분석.
@@ -651,8 +734,16 @@ def analyze_column(
         raise ValueError('detail_level은 core 또는 full이어야 합니다.')
     from spc_nonnormal import validate_settings
     distribution_config = validate_settings(distribution_config or {})
-    if distribution_config['mode'] == 'nonnormal' and (preprocess_outliers or box_cox_transform):
-        raise ValueError('비정규 모드에서는 자동 이상치 제거·Box-Cox를 끄고 다시 분석하세요.')
+    usage = str(chart_usage_mode).strip().lower()
+    extended = usage == EXTENDED_MODE
+    if ((selected_control_chart == 'imr' and n != 1)
+            or (selected_control_chart == 'xbar_r' and not 2 <= n <= 9)
+            or (selected_control_chart == 'xbar_s' and not 2 <= n <= 25)):
+        raise ValueError("선택한 관리도의 부분군 크기를 확인하세요.")
+    if extended and not 2 <= n <= 25:
+        raise ValueError("확장 슈하르트 관리도는 부분군 크기 2~25에서 사용할 수 있습니다.")
+    if extended and (box_cox_transform or distribution_config["mode"] == "nonnormal"):
+        raise ValueError("확장 슈하르트 관리도에서는 Box–Cox 및 비정규 분포 설정을 해제해 주세요.")
     if np.isfinite(usl) and np.isfinite(lsl) and usl <= lsl:
         raise ValueError("규격 상한 USL은 규격 하한 LSL보다 커야 합니다.")
     if any(np.isinf(v) for v in (usl, lsl, target)):
@@ -665,23 +756,14 @@ def analyze_column(
 
     finite_mask_initial = np.isfinite(raw_series)
     original_series = raw_series[finite_mask_initial]
-    control_phase = "phase2" if str(chart_usage_mode).lower() == "phase2" else "phase1"
+    control_phase = "phase2" if usage in ("phase2", EXTENDED_MODE) else "phase1"
     baseline_requested_count = max(3, int(baseline_subgroups))
     baseline_end = baseline_requested_count * n
     if control_phase == "phase2" and len(raw_series) < baseline_end:
         raise ValueError(f"기준구간 데이터가 부족합니다. 원본 기준 {baseline_requested_count}개 부분군/샘플이 필요합니다.")
 
     # 부분군 경계를 먼저 확정한다. 한 값이 누락된 부분군은 통째로 제외한다.
-    def complete_mask(mask):
-        if n == 1:
-            return mask.copy()
-        count, tail = divmod(len(mask), n)
-        kept = np.zeros(len(mask), dtype=bool)
-        if count:
-            kept[:count * n] = np.repeat(mask[:count * n].reshape(count, n).all(axis=1), n)
-        return kept
-
-    eligible_mask = complete_mask(finite_mask_initial)
+    eligible_mask = complete_subgroup_mask(finite_mask_initial, n)
     source_indices = np.flatnonzero(eligible_mask)
     working_labels = label_values[eligible_mask] if label_values is not None else None
     series_all = raw_series[eligible_mask].copy()
@@ -739,7 +821,7 @@ def analyze_column(
             outlier_info['candidate_items'] = list(outlier_info['items'])
             outlier_info['items'] = [item for item in outlier_info['items'] if item['index'] in outlier_info['approved_indices']]
             out_mask = accepted
-            out_mask_groups = ~complete_mask(~out_mask)
+            out_mask_groups = ~complete_subgroup_mask(~out_mask, n)
             series_all[out_mask_groups] = np.nan
             out_cnt = int(np.sum(out_mask))
             outlier_info["count"] = out_cnt
@@ -820,7 +902,7 @@ def analyze_column(
         raise ValueError(f"전처리 후 유효 표본수가 부족합니다. (필요 {min_len}개, 현재 {len(series_all)}개)")
 
     is_xmr = (n == 1)
-    use_s_chart = (not is_xmr and n >= 10)
+    use_s_chart = not is_xmr and (extended or selected_control_chart == 'xbar_s' or n >= 10)
     if is_xmr:
         dispersion_kind = "MR"
         chart_mode = "I-MR"
@@ -831,20 +913,21 @@ def analyze_column(
         dispersion_kind = "R"
         chart_mode = "Xbar-R"
 
-    control_phase = "phase2" if str(chart_usage_mode).lower() == "phase2" else "phase1"
-    control_phase_label = "관리용" if control_phase == "phase2" else "해석용"
+    control_phase_label = ("확장 슈하르트" if extended else
+                           "관리용" if control_phase == "phase2" else "해석용")
     baseline_used_count = int(np.sum(source_indices < baseline_end)) // n
     if control_phase == "phase2" and baseline_used_count < 3:
         raise ValueError("전처리 후 기준구간의 유효 부분군/샘플이 3개 미만입니다.")
 
+    adjacent = np.diff(source_indices[::n]) == n
     if is_xmr:
         x = series_all
         means = x.copy()
-        mr = np.abs(np.diff(x))
+        mr = np.where(adjacent, np.abs(np.diff(x)), np.nan)
         if control_phase == "phase2":
             baseline_display_count = baseline_used_count
             x_limit = x[:baseline_display_count]
-            mr_limit = np.abs(np.diff(x_limit))
+            mr_limit = mr[:baseline_display_count - 1]
             limit_reference_label = f"원본 샘플 1~{baseline_requested_count} (유효 {baseline_display_count}개)"
         else:
             baseline_display_count = len(means)
@@ -856,13 +939,14 @@ def analyze_column(
         monitor_start_index = baseline_display_count
         monitor_r_start_index = baseline_r_display_count
 
-        r_bar = float(np.mean(mr_limit)) if len(mr_limit) > 0 else np.nan
+        valid_mr = mr_limit[np.isfinite(mr_limit)]
+        r_bar = float(np.mean(valid_mr)) if valid_mr.size else np.nan
         xbarbar = float(np.mean(x_limit))
         sigma_within = (r_bar / _d2_mr) if np.isfinite(r_bar) else np.nan
         ucl = xbarbar + 3 * sigma_within if np.isfinite(sigma_within) else np.nan
         lcl = xbarbar - 3 * sigma_within if np.isfinite(sigma_within) else np.nan
         r_ucl = 3.267 * r_bar if np.isfinite(r_bar) else np.nan
-        r_lcl = 0.0
+        r_lcl = 0.0 if valid_mr.size else np.nan
         ranges = mr
         A2_plot = np.nan
         D3_val = np.nan
@@ -899,7 +983,7 @@ def analyze_column(
 
             # AIAG–VDA 9.3.3.2: RMS subgroup variance and chi-square limits.
             sigma_within = float(np.sqrt(np.mean(ranges_limit**2)))
-            tail = .00135
+            tail = .005 if extended else .00135
             z_limit = float(stats.norm.ppf(1-tail))
             ucl = xbarbar + z_limit*sigma_within/np.sqrt(n)
             lcl = xbarbar - z_limit*sigma_within/np.sqrt(n)
@@ -985,8 +1069,8 @@ def analyze_column(
     if n == 1:
         within_notes.append("n=1: MR 기반 진단용 참고값; σMR=MR̄/1.128; 실제 부분군 내 산포와 구분")
         within_notes.append("정규·독립 관측 가정의 참고 계산이며 이 값으로 공정능력 충족을 판정하지 않습니다")
-        if len(source_indices)>1 and np.any(np.diff(source_indices)!=1):
-            within_notes.append("결측·제외로 원본 순서가 단절됨: 연속 유효값 MR의 시간 간격·독립성 재검토 필요")
+        if not np.all(adjacent):
+            within_notes.append("결측·제외로 원본 순서가 단절된 구간은 이동범위에서 제외")
     else:
         within_notes.append("σw 추정: " + ("√mean(s²)" if use_s_chart else "R̄/d₂"))
     if detail_level != "full":
@@ -1073,6 +1157,8 @@ def analyze_column(
         ucl=ucl,
         lcl=lcl,
         t1_by_manual=True,
+        adjacent=adjacent,
+        mark_completion=control_phase == 'phase2',
     )
     ksq_counts, ksq_idx = det['counts'], det['idx']
 
@@ -1089,9 +1175,10 @@ def analyze_column(
     baseline_ctrl_total = int(x_counts['baseline'] + r_counts['baseline'])
     baseline_recommended_min = 20
     baseline_n_short = bool(control_phase == "phase2" and baseline_display_count < baseline_recommended_min)
+    mr_unavailable = is_xmr and not np.isfinite(r_bar)
     baseline_unstable = bool(
         control_phase == "phase2"
-        and (baseline_ctrl_total > 0 or baseline_ksq_total > 0 or baseline_n_short)
+        and (baseline_ctrl_total > 0 or baseline_ksq_total > 0 or baseline_n_short or mr_unavailable)
     )
     baseline_status = "부적합" if baseline_unstable else ("해당없음" if control_phase != "phase2" else "적합")
     baseline_reasons: List[str] = []
@@ -1102,6 +1189,8 @@ def analyze_column(
             baseline_reasons.append("기준구간 KSQ 위반")
         if baseline_n_short:
             baseline_reasons.append(f"기준구간 {baseline_display_count}개(<{baseline_recommended_min} 권장)")
+        if mr_unavailable:
+            baseline_reasons.append("기준구간에 이동범위를 계산할 인접 관측값이 없음")
 
     limit_reference_desc = (
         f"초기 {limit_reference_label} 기준 고정 관리한계"
@@ -1135,7 +1224,7 @@ def analyze_column(
     if detail_level != "full":
         capability_status = "미평가"
         capability_reasons.append("상세(full) 분석에서 평가")
-    elif capability_unavailable or not has_spec or not np.isfinite(std_all) or std_all <= 0:
+    elif capability_unavailable or not has_spec or not np.isfinite(std_all) or std_all <= 0 or mr_unavailable:
         capability_status = "계산불가"
         if capability_unavailable:
             capability_reasons.append("규격 변환 불가")
@@ -1143,6 +1232,8 @@ def analyze_column(
             capability_reasons.append("규격없음")
         if not np.isfinite(std_all) or std_all <= 0:
             capability_reasons.append("전체 산포가 0이거나 유효하지 않음")
+        if mr_unavailable:
+            capability_reasons.append("이동범위를 계산할 인접 관측값이 없어 관리한계 미산정")
     else:
         if x_ctrl_violation_count + r_ctrl_violation_count > 0 or any(ksq_counts.values()):
             capability_reasons.append("공정불안정: 관리이탈 또는 활성 KSQ 규칙 위반")
@@ -1154,9 +1245,9 @@ def analyze_column(
             capability_reasons.append("정규성 확인 불가")
         if x_ctrl_violation_count + r_ctrl_violation_count > 0 or any(ksq_counts.values()) or baseline_unstable:
             capability_status = "관리상태 확인"
-        elif normality_suspect:
+        elif box_cox_applied and normality_suspect:
             capability_status = "분포 검토 필요"
-        elif "만족" not in norm_msg:
+        elif box_cox_applied and "만족" not in norm_msg:
             capability_status = "정규성 확인 필요"
         else:
             capability_status = "적용 가능"
@@ -1169,7 +1260,7 @@ def analyze_column(
         "관측 구간의 적용 조건 충족은 공식 공정능력 입증을 의미하지 않습니다."
     )
     if normality_suspect or "만족" not in norm_msg:
-        performance_note += " 비정규 의심 또는 정규성 미확인: 모델 검토 전 능력 판정에 사용하지 마세요."
+        performance_note += " 정규성 검토 전에는 지수와 기준 비교를 예비 결과로 해석하세요."
         within_capability_note += ("; MR 정규모형 가정 미확인: 비정규 의심 자료의 Cwk·PPM은 해석 주의가 필요한 참고값" if n == 1 else "; 군내 정규성은 별도 확인 필요")
 
     result = dict(
@@ -1260,11 +1351,13 @@ def analyze_column(
         recent_spec_violation=recent_spec_violation,
         recent_ctrl_violation=recent_ctrl_violation,
         is_xmr=is_xmr,
+        mr_gap_count=int(np.count_nonzero(~adjacent)) if is_xmr else 0,
         chart_mode=chart_mode,
         dispersion_kind=dispersion_kind,
         n=n,
         A2_plot=A2_plot,
         control_phase=control_phase,
+        chart_usage_mode=EXTENDED_MODE if extended else control_phase,
         control_phase_label=control_phase_label,
         baseline_requested_count=baseline_requested_count,
         baseline_display_count=baseline_display_count,
@@ -1288,9 +1381,27 @@ def analyze_column(
     result['within_estimator'] = within_estimator
     mr_reference = {key: result[key] for key in ('std_within','cw','cwk','ppm_within','within_capability_note')} if n == 1 and not box_cox_applied else None
     if distribution_config['mode'] == 'nonnormal':
-        from spc_nonnormal import apply_analysis
-        result = apply_analysis(result, distribution_config)
-        if mr_reference is not None:
+        from spc_nonnormal import apply_analysis, fingerprint
+        cfg = distribution_config
+        lower = cfg['natural_lower']
+        model_warning = ''
+        if preprocess_outliers or box_cox_transform:
+            model_warning = '저장된 비정규 분포와 현재 전처리·변환 설정을 함께 적용할 수 없습니다.'
+        elif not cfg['chart_family'] or cfg['confirmed_digest'] != fingerprint(result, lower):
+            model_warning = '저장된 비정규 분포가 이번 분석 자료 또는 조건과 일치하지 않습니다.'
+        else:
+            candidate = apply_analysis(result, cfg)
+            if candidate['chart_fit_status'] == '적합도 기준 통과':
+                result = candidate
+                if result['performance_fit_status'] != '적합도 기준 통과':
+                    result['distribution_warning'] = ('승인된 피어슨 위치 관리한계는 유지합니다. '
+                                                      + result['performance_fit_status'])
+            else:
+                model_warning = '저장된 비정규 분포 적용 실패: ' + '; '.join(candidate['capability_reasons'])
+        if model_warning:
+            result['distribution_warning'] = model_warning + (' 현재 Box–Cox 분석 결과를 표시합니다.' if box_cox_applied
+                else ' 정규분포 가정 결과를 표시합니다. 비정규 모형을 사용하려면 분포 진단을 다시 실행하세요.')
+        elif mr_reference is not None:
             result.update(mr_reference)
             result['within_capability_note'] += '; 선택 분포의 G/Z와 별개인 정규식 MR 참고 계산'
             result['within_overall_ratio'] = abs(result['cwk']/result['ppk']) if np.isfinite(result['cwk']) and np.isfinite(result['ppk']) and result['ppk'] != 0 else np.nan
@@ -1302,7 +1413,21 @@ def analyze_column(
         result = boxcox_capability(result)
     from spc_normality import result_diagnostics
     result['normality_diagnostics'] = result_diagnostics(result)
-    return finalize_assessment(result, assessment_settings)
+    if (detail_level == 'full' and result['distribution_mode'] == 'normal'
+            and not box_cox_applied and "만족" not in norm_msg):
+        notice = ('비정규 의심' if normality_suspect else '정규성 확인 불가')
+        warning = f'{notice} ({norm_msg}). 지수와 기준 비교는 정규분포 가정 참고 결과입니다.'
+        result['distribution_warning'] = ' '.join(filter(None, (result.get('distribution_warning'), warning)))
+    if result.get('distribution_warning'):
+        result['performance_note'] += ' ' + result['distribution_warning']
+    result = finalize_assessment(result, assessment_settings)
+    if extended:
+        from spc_extended import calculate
+        try:
+            result["extended_shewhart"] = calculate(result, {"method": "extremes"})
+        except ValueError as exc:
+            result["extended_shewhart_error"] = str(exc)
+    return result
 
 
 def _excel_engine(path_or_bytes, head: bytes = b'') -> str:
@@ -1499,6 +1624,7 @@ def run_full_analysis(
     progress_callback=None,
     distribution_settings: Optional[Dict[str, Any]] = None,
     assessment_settings: Optional[Dict[str, Any]] = None,
+    selected_control_chart: Optional[str] = None,
 ) -> Tuple[List[Dict], pd.DataFrame]:
     """
     전체 분석 실행.
@@ -1506,13 +1632,14 @@ def run_full_analysis(
     """
     from spc_nonnormal import MODEL_VERSION, normalize_settings_map
     from spc_normality import STATUS_LABELS
-    distribution_settings = normalize_settings_map(distribution_settings)
+    distribution_settings = ({} if str(chart_usage_mode).strip().lower() == EXTENDED_MODE
+                             else normalize_settings_map(distribution_settings))
     assessment_settings = normalize_assessment(assessment_settings)
     settings = dict(assessment_settings=assessment_settings, distribution_settings=distribution_settings, distribution_model_version=MODEL_VERSION,
                     detail_level=detail_level, selected_columns=selected_columns, data_sheet=data_sheet, spec_sheet=spec_sheet, n=n,
                     include_incomplete=include_incomplete, data_layout_mode=data_layout_mode,
                     subgroup_columns=subgroup_columns, subgroup_var_name=subgroup_var_name,
-                    ksq_toggles=ksq_toggles, chart_usage_mode=chart_usage_mode,
+                    ksq_toggles=ksq_toggles, chart_usage_mode=chart_usage_mode, selected_control_chart=selected_control_chart,
                     baseline_subgroups=baseline_subgroups, manual_target_map=manual_target_map,
                     preprocess_outliers=preprocess_outliers, box_cox_transform=box_cox_transform,
                     measurement_date_column=measurement_date_column,
@@ -1683,7 +1810,13 @@ def run_full_analysis(
                 detail_level=detail_level,
                 distribution_config=distribution_settings.get(str(col)),
                 assessment_settings=assessment_settings,
+                selected_control_chart=selected_control_chart,
             )
+            it['data_layout_mode'] = layout_mode
+            if layout_mode == "wide_subgroup_cols":
+                it['subgroup_columns'] = [str(c) for c in selected_cols]
+                it['subgroup_groups_used'] = int(valid_mask.sum())
+                it['subgroup_groups_skipped'] = int((~valid_mask).sum())
             it['assessment'] = assess_process(it)
             results.append(it)
 
@@ -1707,9 +1840,17 @@ def run_full_analysis(
                 '정규성 대상': '원단위 · 분석 포함 개별값',
                 '검정N': it.get('normality_diagnostics',{}).get('individual',{}).get('test_n'),
                 '왜도': it.get('normality_diagnostics',{}).get('individual',{}).get('skewness'),
-                '초과첨도': it.get('normality_diagnostics',{}).get('individual',{}).get('excess_kurtosis'),
-                '고객 요구값': assessment_settings['required_limit'],
-                '개선 경계': assessment_settings['warning_limit'],
+                '일반 첨도': it.get('normality_diagnostics',{}).get('individual',{}).get('kurtosis'),
+                '평가 기준 방식': assessment_settings['criteria_mode'],
+                '고객 요구값': assessment_settings['required_limit'] if assessment_settings['criteria_mode'] == 'manual' else None,
+                '개선 경계': assessment_settings['warning_limit'] if assessment_settings['criteria_mode'] == 'manual' else None,
+                **{f'{key} 요구값': it.get('capability_criteria', {}).get('indices', {}).get(key.lower(), {}).get('required')
+                   for key in ('Cp', 'Cpk', 'Pp', 'Ppk')},
+                **{f'{key} 기준 판정': it.get('capability_criteria', {}).get('indices', {}).get(key.lower(), {}).get('status')
+                   for key in ('Cp', 'Cpk', 'Pp', 'Ppk')},
+                '특성 중요도': it.get('capability_criteria', {}).get('characteristic_class'),
+                '평가 단계': it.get('capability_criteria', {}).get('study_stage'),
+                '평가 신뢰수준': assessment_settings['confidence'],
                 '조사 결론': it.get('study_conclusion', ''),
                 '시간 패턴 검토': it.get('sequence_review', {}).get('count', 0),
                 '기준분포 상태': it.get('chart_fit_status', ''),

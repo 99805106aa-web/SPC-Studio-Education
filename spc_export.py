@@ -8,12 +8,13 @@ Excel / PDF 내보내기 모듈
 
 import io
 from spc_access import day_guard
-from spc_core import WITHIN_CAPABILITY_NOTICE, assess_process, fmt_ppm
+from spc_core import WITHIN_CAPABILITY_NOTICE, assess_process, fmt_ppm, mean_confidence_interval, screening_index_pair
 import math
 import base64
 import numpy as np
 import pandas as pd
-from spc_normality import diagnostics_html
+from spc_normality import diagnostics_html, shape_summary_display
+from spc_extended import EXTENDED_MODE, GUIDE as EXTENDED_GUIDE, TITLE as EXTENDED_TITLE, calculation_note, monitor_signals
 from typing import Any, Dict, List, Optional, Tuple
 
 PROCESS_INFO_LABELS = ["공정명", "라인/호기", "설비명", "제품명", "품번", "Lot/Batch", "작업자/교대", "비고"]
@@ -68,6 +69,7 @@ def _chart_mode_label(meta: Optional[Dict[str, Any]]) -> str:
     return {
         "phase1": "해석용 관리도",
         "phase2": "관리용 관리도",
+        EXTENDED_MODE: "확장 슈하르트 관리도",
     }.get(mode, mode)
 
 
@@ -95,6 +97,7 @@ def _summary_visible_df(summary_df: pd.DataFrame) -> pd.DataFrame:
             summary_df.insert(insert_at, "신뢰도", combined)
     if "군내/전체 지수 비율(Cwk/Ppk)" in summary_df.columns:
         summary_df = summary_df.rename(columns={"군내/전체 지수 비율(Cwk/Ppk)": "군내/전체 지수 비율"})
+    summary_df = shape_summary_display(summary_df)
     drop_cols = [c for c in SUMMARY_HIDDEN_COLUMNS if c in summary_df.columns]
     return summary_df.drop(columns=drop_cols) if drop_cols else summary_df
 
@@ -131,28 +134,48 @@ def _report_fmt_ppm_int(v) -> str:
     return fmt_ppm(v)
 
 
-def _report_metric_cls(v, it=None) -> str:
+def _report_metric_cls(v, it=None, metric='cpk') -> str:
     try:
         fv = float(v)
         if not np.isfinite(fv):
             return "na"
-        from spc_policy import limits
-        warning, required = limits(it)
-        if fv < warning:
-            return "bad"
-        if fv < required:
-            return "warn"
-        return "good"
+        from spc_policy import band
+        return band(fv, it, metric)
     except Exception:
         return "na"
 
 
 def _report_summary_spec(summary_df: pd.DataFrame):
     df = _summary_visible_df(summary_df).copy()
-    cap_cols = [c for c in ["Cp", "Cpk", "Cpm", "Cpmk"] if c in df.columns]
+    cap_cols = [c for c in ["Cp", "Cpk", "Pp", "Ppk", "Cpm", "Cpmk"] if c in df.columns]
     ppm_cols = [c for c in df.columns if "PPM" in str(c)]
     cnt_cols = [c for c in df.columns if ("이탈" in str(c) or "위반" in str(c))]
     return df, cap_cols, ppm_cols, cnt_cols
+
+
+def _extended_report_monitors(results):
+    return {str(it['column']): monitor_signals(it['extended_shewhart']) if it.get('extended_shewhart') else None
+            for it in results if it.get('chart_usage_mode') == EXTENDED_MODE}
+
+
+def _extended_monitor_counts(monitor):
+    if monitor is None or monitor.empty:
+        return None, None, None, None
+    signals = monitor[['확장 X̄', 'S']]
+    x_count, s_count = map(int, signals.sum())
+    return x_count, s_count, x_count + s_count, int(signals.iloc[-1].any())
+
+
+def _apply_extended_monitor_summary(summary, monitors):
+    if not monitors or summary.empty or '변수' not in summary:
+        return
+    names = summary['변수'].astype(str)
+    mask = names.isin(monitors)
+    counts = {name: _extended_monitor_counts(monitor) for name, monitor in monitors.items()}
+    for i, column in enumerate(('X관리이탈', 'R관리이탈', '관리이탈', '최근관리이탈')):
+        if column in summary:
+            summary[column] = summary[column].astype(object)
+            summary.loc[mask, column] = [counts[name][i] for name in names[mask]]
 
 
 def _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols, it=None) -> Tuple[str, str]:
@@ -166,7 +189,7 @@ def _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols, it=None) -> Tup
     try:
         fv = float(str(val).replace(",", ""))
         if col in cap_cols:
-            cls = _report_metric_cls(fv, it)
+            cls = _report_metric_cls(fv, it, col)
         elif col in ppm_cols:
             sval = _report_fmt_ppm_int(fv)
             if fv > 50000:
@@ -194,7 +217,7 @@ def _report_meta_items(analysis_meta: Optional[Dict[str, Any]], now: str) -> Lis
     ]
 
 
-def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
+def _report_variable_detail(it: Dict[str, Any], monitor=None) -> Dict[str, Any]:
     is_xmr = bool(it.get("is_xmr", False))
     x_lab = "X" if is_xmr else "Xbar"
     disp_kind_raw = str(it.get("dispersion_kind", "MR" if is_xmr else "R"))
@@ -209,48 +232,78 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
     cpk = it.get("cpk", np.nan)
     spec_v = int(it.get("spec_violation_count", 0))
     ctrl_v = int(it.get("x_ctrl_violation_count", 0) + it.get("r_ctrl_violation_count", 0))
+    is_extended = it.get('chart_usage_mode') == EXTENDED_MODE
+    if is_extended:
+        _, _, ctrl_v, _ = _extended_monitor_counts(monitor)
     assessment = assess_process(it)
     risk_cls = {"high": "bad", "medium": "warn", "unknown": "warn", "low": "good"}[assessment['level']]
     if risk_cls == 'good' and it.get('capability_status') != '적용 가능':
         risk_cls = 'warn'
 
-    ppk = it.get("ppk", np.nan)
-    metric_items = [
+    pair = screening_index_pair(it)
+    main_pair = (pair['width_metric'], pair['shifted_metric']) if pair['width_metric'] else ('pp', 'ppk')
+    remaining_pair = ('pp', 'ppk') if main_pair[0] == 'cp' else ('cp', 'cpk')
+    suffix = '.' + it.get('capability_method', 'G') if it.get('box_cox_applied') or it.get('distribution_mode') == 'nonnormal' else ''
+    pair_items = []
+    for metric in (*main_pair, *remaining_pair):
+        value = it.get(metric, np.nan)
+        label = metric.capitalize() + suffix + (' (전체산포 고려)' if metric.startswith('pp') else '')
+        display = _report_fmt_value(value)
+        if metric == 'cpk' and display == '—' and it.get('capability_status') != '적용 가능':
+            display = it.get('capability_status', '재분석 필요')
+        pair_items.append((label, display, _report_metric_cls(value, it, metric)))
+    core_metrics = [
         ("N", _report_fmt_value(len(it.get("series", [])), 0), ""),
-        ("Cpk", _report_fmt_value(cpk) if not np.isnan(cpk) else str(it.get("capability_status", "재분석 필요")), _report_metric_cls(cpk, it)),
-        ("PPM(Cwk, 진단용)", _report_fmt_ppm_int(it.get("ppm_within", np.nan)), ""),
-        ("Ppk (모델 참고)", _report_fmt_value(ppk), ""),
-        ("PPM(Ppk, 모델 참고)", _report_fmt_ppm_int(it.get("ppm_ppk", np.nan)), ""),
-        ("Cpm", _report_fmt_value(it.get("cpm", np.nan)), _report_metric_cls(it.get("cpm", np.nan), it)),
-        ("Cpmk", _report_fmt_value(it.get("cpmk", np.nan)), _report_metric_cls(it.get("cpmk", np.nan), it)),
-        ("Cw (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cw (진단용)", _report_fmt_value(it.get("cw", np.nan)), ""),
-        ("Cwk (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cwk (진단용)", _report_fmt_value(it.get("cwk", np.nan)), ""),
+        *pair_items[:2],
+        ("Cw (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cw (군내산포 고려)", _report_fmt_value(it.get("cw", np.nan)), ""),
+        ("Cwk (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cwk (군내산포 고려)", _report_fmt_value(it.get("cwk", np.nan)), ""),
         ("규격 이탈", f"{spec_v:,}", "bad" if spec_v > 0 else "good"),
-        ("관리 이탈", f"{ctrl_v:,}", "bad" if ctrl_v > 0 else "good"),
+        ("감시 관리 이탈 (확장 X̄·S)" if is_extended else "관리 이탈",
+         '—' if ctrl_v is None else f"{ctrl_v:,}",
+         '' if ctrl_v is None else "bad" if ctrl_v > 0 else "good"),
+    ]
+    capability_metrics = [
+        *pair_items[2:],
+        ("Cpm", _report_fmt_value(it.get("cpm", np.nan)), _report_metric_cls(it.get("cpm", np.nan), it, 'cpm')),
+        ("Cpmk", _report_fmt_value(it.get("cpmk", np.nan)), _report_metric_cls(it.get("cpmk", np.nan), it, 'cpmk')),
+        ("PPM(Cwk, 군내산포 고려)", _report_fmt_ppm_int(it.get("ppm_within", np.nan)), ""),
+        ("PPM(Ppk, 전체산포 고려)", _report_fmt_ppm_int(it.get("ppm_ppk", np.nan)), ""),
+    ]
+    specification_metrics = [
         ("USL (원단위)" if it.get('box_cox_applied') else "USL", _report_fmt_value(it.get("original_usl" if it.get('box_cox_applied') else "usl", np.nan)), ""),
         ("LSL (원단위)" if it.get('box_cox_applied') else "LSL", _report_fmt_value(it.get("original_lsl" if it.get('box_cox_applied') else "lsl", np.nan)), ""),
         ("목표치(T)", _report_fmt_value(it.get("target", np.nan)), ""),
+    ]
+    control_metrics = [
         (f"{x_lab}-UCL", _report_fmt_value(it.get("ucl", np.nan)), ""),
         (f"{x_lab}-LCL", _report_fmt_value(it.get("lcl", np.nan)), ""),
         (f"{disp_kind_raw}-UCL", _report_fmt_value(it.get("r_ucl", np.nan)), ""),
     ]
     if r_lcl_applicable:
-        metric_items.append((f"{disp_kind_raw}-LCL", _report_fmt_value(it.get("r_lcl", np.nan)), ""))
+        control_metrics.append((f"{disp_kind_raw}-LCL", _report_fmt_value(it.get("r_lcl", np.nan)), ""))
+    if it.get('dispersion_limit_method'):
+        control_metrics.append(('산포 관리한계 계산', it['dispersion_limit_method'], ''))
+    if is_extended:
+        control_metrics = []
+        extended = it.get('extended_shewhart')
+        if extended is not None:
+            for name, (lcl, _, ucl) in extended['limits'].items():
+                label = f'{name} (비교)' if name == '일반 X̄' else name
+                control_metrics.extend((f'{label} {limit}', _report_fmt_value(value), '')
+                                       for limit, value in (('LCL', lcl), ('UCL', ucl)))
+                if monitor is not None and not monitor.empty:
+                    control_metrics.append((f'{label} 감시 이탈', str(int(monitor[name].sum())), ''))
 
     performance_note = str(it.get('performance_note', '이전 결과: 재분석 필요'))
+    performance_note = pair['state'] + ' · ' + performance_note
     performance_note += ' · ' + it.get('study_conclusion', '')
     cfg = it.get('assessment_settings', {})
-    performance_note += f" · 고객 요구 {cfg.get('required_limit', 1.33):.2f} / 개선 경계 {cfg.get('warning_limit', 1.):.2f}"
+    from spc_policy import criteria_description
+    performance_note += ' · ' + criteria_description(it)
     if it.get('capability_confidence'):
         ci = it['capability_confidence']
         performance_note += f" · Ppk 단측 {ci['confidence']:.1%} 신뢰하한 {ci['ppk_lower']:.4f} ({ci['method']})"
-    if it.get('box_cox_applied'):
-        metric_items = [(key+'.G' if key in ('Cpk', 'Ppk (모델 참고)') else key, value, cls)
-                        for key,value,cls in metric_items]
     if it.get('distribution_mode') == 'nonnormal':
-        method = it.get('capability_method', 'G')
-        metric_items = [(key + '.' + method if key in ('Cpk', 'Ppk (모델 참고)') else key, val, cls)
-                        for key, val, cls in metric_items]
         model = it.get('distribution_model') or it.get('chart_model') or {}
         params_text = ', '.join(f'{value:.6g}' for value in model.get('params', []))
         model_note = f"분포 {model.get('name', '미확인')} · 모수 [{params_text}] · 적합 N {model.get('fit_n', '—')} / 검정 N {model.get('test_n', '—')} · AD p={model.get('pvalue', '—')}"
@@ -262,6 +315,9 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
                                  for m, v in it.get('capability_methods', {}).items())
         performance_note += ' ' + model_note + ' · ' + comparisons + ' · ' + it.get('pearson_rules_note', '')
 
+    metric_groups = [("능력·예상 PPM", capability_metrics), ("규격·목표", specification_metrics)]
+    if control_metrics:
+        metric_groups.append(("관리한계", control_metrics))
     return {
         "column": str(it.get("column", "")),
         "risk_cls": risk_cls,
@@ -270,7 +326,8 @@ def _report_variable_detail(it: Dict[str, Any]) -> Dict[str, Any]:
         "within_note": str(it.get("within_capability_note", "이전 분석 결과: 재분석 필요")),
         "capability_note": str(it.get("capability_status", "재분석 필요")) + ": " + "; ".join(it.get("capability_reasons", [])),
         "performance_note": performance_note,
-        "metric_items": metric_items,
+        "core_metrics": core_metrics,
+        "metric_groups": metric_groups,
     }
 
 
@@ -334,23 +391,24 @@ def export_summary_excel(
             or n.startswith("KSQ T")
         )
 
-    capability_names = {"Cp", "Cpk", "Cpm", "Cpmk"}
+    capability_names = {"Cp", "Cpk", "Pp", "Ppk", "Cpm", "Cpmk"}
 
-    def _style_value_cell(cell, col_name: str):
+    result_by_name = {str(it['column']): it for it in results}
+    def _style_value_cell(cell, col_name: str, item=None):
         v = cell.value
         if not isinstance(v, (int, float)):
             return
         fv = float(v)
         if col_name in capability_names:
-            from spc_policy import limits
-            warning, required = limits(results[0] if results else None)
-            if fv < warning:
+            from spc_policy import band
+            state = band(fv, item, col_name)
+            if state == 'bad':
                 cell.fill = fill_crit
                 cell.font = font_crit
-            elif fv < required:
+            elif state == 'warn':
                 cell.fill = fill_warn
                 cell.font = font_warn
-            else:
+            elif state == 'good':
                 cell.fill = fill_good
                 cell.font = font_good
         elif "PPM" in str(col_name):
@@ -426,12 +484,18 @@ def export_summary_excel(
 
     # Sheet 1/2: 선별 요약
     summary_export_df = _summary_visible_df(summary_df)
+    extended_monitors = _extended_report_monitors(results)
+    _apply_extended_monitor_summary(summary_export_df, extended_monitors)
     headers = list(summary_export_df.columns)
     ws.append(headers)
     from openpyxl.comments import Comment
     for label in ("Cw", "Cwk"):
         if label in headers:
             ws.cell(1, headers.index(label) + 1).comment = Comment(WITHIN_CAPABILITY_NOTICE, "SPC")
+    if extended_monitors:
+        for label, chart in (("X관리이탈", "확장 X̄"), ("R관리이탈", "S")):
+            if label in headers:
+                ws.cell(1, headers.index(label) + 1).comment = Comment(f"확장 슈하르트 행은 {chart} 관리도의 감시구간 이탈 건수입니다.", "SPC")
     for col_idx in range(1, len(headers) + 1):
         c = ws.cell(row=1, column=col_idx)
         c.fill = header_fill
@@ -440,7 +504,8 @@ def export_summary_excel(
         c.border = border
 
     # 숫자형 컬럼 추정(요약 DF 내 문자열 숫자 -> 실제 숫자로 변환)
-    numeric_cols = set()
+    numeric_cols = ({'X관리이탈', 'R관리이탈', '관리이탈', '최근관리이탈'} & set(headers)
+                    if extended_monitors else set())
     for col in headers:
         vals = summary_export_df[col].tolist()
         parsed = [_nv(v) for v in vals[:80]]
@@ -472,7 +537,8 @@ def export_summary_excel(
                     c.number_format = "#,##0"
                 else:
                     c.number_format = "0.000"
-                _style_value_cell(c, col_name)
+                item = result_by_name.get(str(ws.cell(row_idx, var_col_idx).value)) if var_col_idx else None
+                _style_value_cell(c, col_name, item)
             elif col_name in {"신뢰도 상태", "신뢰도"}:
                 reliability_value = str(c.value or "").strip()
                 if reliability_value.startswith("계산불가") or reliability_value.startswith("검토필요"):
@@ -517,6 +583,20 @@ def export_summary_excel(
 
     for it in results:
         ksq_c = it.get("ksq_counts", {}) or {}
+        name = str(it['column'])
+        is_extended = name in extended_monitors
+        x_cl, x_ucl, x_lcl = it.get('xbarbar'), it.get('ucl'), it.get('lcl')
+        r_cl, r_ucl, r_lcl = it.get('r_bar'), it.get('r_ucl'), it.get('r_lcl')
+        kind = str(it.get('dispersion_kind', ''))
+        x_count = int(it.get('xbar_ucl_cnt', 0) + it.get('xbar_lcl_cnt', 0))
+        r_count = int(it.get('r_ucl_cnt', 0) + it.get('r_lcl_cnt', 0))
+        if is_extended:
+            ext = it.get('extended_shewhart')
+            limits = ext['limits'] if ext else {}
+            x_lcl, x_cl, x_ucl = limits.get('확장 X̄', (None, None, None))
+            r_lcl, r_cl, r_ucl = limits.get('S', (None, None, None))
+            x_count, r_count, _, _ = _extended_monitor_counts(extended_monitors[name])
+            kind = 'S (확장 X̄와 함께, 감시구간 집계)'
         row = [
             str(it.get("column", "")),
             int(len(it.get("series", []))),
@@ -546,28 +626,21 @@ def export_summary_excel(
             _f(it.get("original_lsl")),
             _f(it.get("original_target")),
             "전처리 후" if it.get("preprocess_applied") else "원본",
-            _f(it.get("xbarbar")),
-            _f(it.get("ucl")),
-            _f(it.get("lcl")),
-            str(it.get("dispersion_kind", "")),
-            _f(it.get("r_bar")),
-            _f(it.get("r_ucl")),
-            _f(it.get("r_lcl")),
-            int(it.get("xbar_ucl_cnt", 0) + it.get("xbar_lcl_cnt", 0)),
-            int(it.get("r_ucl_cnt", 0) + it.get("r_lcl_cnt", 0)),
+            _f(x_cl),
+            _f(x_ucl),
+            _f(x_lcl),
+            kind,
+            _f(r_cl),
+            _f(r_ucl),
+            _f(r_lcl),
+            x_count,
+            r_count,
             int(it.get("spec_violation_count", 0)),
             str(it.get("baseline_status", "")),
             "; ".join(it.get("baseline_reasons", [])),
             int((it.get("outlier_info") or {}).get("count", 0)),
             str(it.get("norm_msg", "")),
-            int(ksq_c.get("T1", 0)),
-            int(ksq_c.get("T2", 0)),
-            int(ksq_c.get("T3", 0)),
-            int(ksq_c.get("T4", 0)),
-            int(ksq_c.get("T5", 0)),
-            int(ksq_c.get("T6", 0)),
-            int(ksq_c.get("T7", 0)),
-            int(ksq_c.get("T8", 0)),
+            *(None if is_extended else int(ksq_c.get(f'T{i}', 0)) for i in range(1, 9)),
             _f(it.get("cw")),
             _f(it.get("cwk")),
             WITHIN_CAPABILITY_NOTICE + " " + str(it.get("within_capability_note", "이전 분석 결과: 재분석 필요")),
@@ -587,7 +660,7 @@ def export_summary_excel(
             c.alignment = left if col_name in detail_text_cols else center
             if isinstance(c.value, (int, float)):
                 c.number_format = "#,##0" if (col_name in detail_int_cols or "PPM" in col_name) else "0.000"
-                _style_value_cell(c, col_name)
+                _style_value_cell(c, col_name, result_by_name.get(str(ws2.cell(row_idx, 1).value)))
 
     ws2.freeze_panes = "A2"
     _auto_width(ws2, max_width=24)
@@ -597,7 +670,7 @@ def export_summary_excel(
     ws_note.append(["Cw·Cwk", WITHIN_CAPABILITY_NOTICE])
     ws_note.append(["계산식", "Cw=(USL−LSL)/(6σw); Cwk=min((USL−평균)/(3σw), (평균−LSL)/(3σw))"])
     ws_note.append(["적용", "n=1은 MR 기반 앱 참고값, n≥2는 군내 진단. Cw는 양측 규격, Cwk는 최소 한쪽 규격이 필요합니다."])
-    ws_note.append(["추정 방법", "n=1: MR̄/1.128; 2≤n≤9: R̄/d₂; n≥10: √mean(s²). 관리용 모드는 기준구간 산포와 전체 평균을 사용합니다. Box–Cox 군내 지수는 미적용입니다."])
+    ws_note.append(["추정 방법", "I–MR: 원본 인접 관측값 MR̄/1.128. X̄–R: R̄/d₂. X̄–S: √mean(s²). 관리용 모드는 기준구간 산포와 전체 평균을 사용합니다. Box–Cox 군내 지수는 미적용입니다."])
     ws_note.column_dimensions['A'].width = 18
     ws_note.column_dimensions['B'].width = 90
     for row in ws_note.iter_rows():
@@ -608,18 +681,32 @@ def export_summary_excel(
     ws_review = wb.create_sheet('평가·검토')
     ws_review.append(['변수', '항목', '값'])
     for it in results:
-        for key in ('assessment_settings','sequence_review','capability_confidence','study_conclusion','outlier_info','within_estimator','within_capability_note',
+        for key in ('assessment_settings','capability_criteria','sequence_review','capability_confidence','study_conclusion','outlier_info','within_estimator','within_capability_note',
                     'dispersion_limit_method','capability_quantile_scale','capability_quantiles'):
             value = it.get(key)
             ws_review.append([str(it['column']),key,json.dumps(value,ensure_ascii=False,default=str) if isinstance(value,(dict,list)) else value])
     _auto_width(ws_review, max_width=100)
-    from spc_normality import diagnostic_rows, STATUS_LABELS
+    from spc_policy import CRITERIA_STATUS, reference_only_decision, REFERENCE_COMPARISON_LABEL
+    ws_criteria = wb.create_sheet('표본수별 평가기준')
+    ws_criteria.append(['변수','방식','중요도','평가 단계','유효N','기준N','신뢰수준','지수','기본 목표','적용 요구값','실제값','판정','사유','출처'])
+    for it in results:
+        record = it.get('capability_criteria', {})
+        for key, d in record.get('indices', {}).items():
+            reference_only = reference_only_decision(d)
+            ws_criteria.append([str(it['column']),record['mode'],record['characteristic_class'],record['study_stage'],
+                record['sample_n'],record['reference_n'],record['confidence'],key.capitalize(),d['base'],
+                None if reference_only else d['required'],d['value'],
+                REFERENCE_COMPARISON_LABEL if reference_only else CRITERIA_STATUS[d['status']],
+                '; '.join(d['reasons']),record['source']])
+    ws_criteria.freeze_panes = 'A2'
+    _auto_width(ws_criteria, max_width=80)
+    from spc_normality import diagnostic_rows, shape_magnitude, STATUS_LABELS
     ws_normality=wb.create_sheet('정규성·형태')
-    ws_normality.append(['변수','대상','범위','단위','검정법','통계량','보정 AD 통계량','p값','판정','유의수준','검정N','전체N','왜도','초과첨도','표본 방식','사유'])
+    ws_normality.append(['변수','대상','범위','단위','검정법','통계량','보정 AD 통계량','p값','판정','유의수준','검정N','전체N','왜도','첨도','표본 방식','사유'])
     for row in diagnostic_rows(results):
         ws_normality.append([row['variable'],row['target'],row['scope'],row['scale'],row['test'],row['statistic'],
             row['adjusted_statistic'],row['pvalue'],STATUS_LABELS[row['status']],row['alpha'],row['test_n'],row['total_n'],
-            row['skewness'],row['excess_kurtosis'],row['sampling'],row['reason']])
+            shape_magnitude(row['skewness']),shape_magnitude(row.get('kurtosis')),row['sampling'],row['reason']])
         ws_normality.cell(ws_normality.max_row,8).number_format='[<0.001]"<0.001";0.000000'
     ws_normality.freeze_panes='A2'
     _auto_width(ws_normality,max_width=65)
@@ -640,9 +727,162 @@ def export_summary_excel(
         ws_model.freeze_panes = 'A2'
         _auto_width(ws_model, max_width=100)
 
+    extended_items = [it for it in results if it.get("extended_shewhart")]
+    if extended_items:
+        settings = wb.create_sheet("확장 Xbar-S 한계")
+        settings.append(["변수", "관리도", "LCL", "CL", "UCL", "기준구간", "평균 범위 방식",
+                         "비개입 확률", "n", "군내 표준편차 추정", "관리 여유", "예상 평균 하단", "예상 평균 상단",
+                         "직후 기준 부분군", "직전 기준 부분군"])
+        decisions = wb.create_sheet("확장 Xbar-S 판정")
+        decisions.append(["변수", *extended_items[0]["extended_shewhart"]["table"].columns])
+        for it in extended_items:
+            result = it["extended_shewhart"]
+            for name, limits in result["limits"].items():
+                settings.append([str(it["column"]), name, *limits, result["reference"], result["method"],
+                                 result["confidence"], result["n"], result["sigma"], result["margin"],
+                                 result["lower"], result["upper"], result["counts"].get("교체 직후"),
+                                 result["counts"].get("교체 직전")])
+                settings.cell(settings.max_row, 1).data_type = "s"
+                settings.cell(settings.max_row, 8).number_format = "0.00%"
+            for row in result["table"].itertuples(index=False, name=None):
+                decisions.append([str(it["column"]), *row])
+                decisions.cell(decisions.max_row, 1).data_type = "s"
+            settings.append([EXTENDED_GUIDE])
+        for sheet in (settings, decisions):
+            sheet.freeze_panes = "B2"
+            _auto_width(sheet)
+        decisions.auto_filter.ref = decisions.dimensions
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _distribution_detail_metrics(it, record):
+    from html import escape
+
+    values = np.asarray(it.get('series', []), dtype=float)
+    values = values[np.isfinite(values)]
+    spread = ''
+    if values.size:
+        low, q1, q3, high = np.quantile(values, [0, .25, .75, 1])
+        spread = (
+            "<div class='distribution-spread'><h4>측정값 범위</h4><dl>"
+            f"<div><dt>최솟값–최댓값</dt><dd>{low:.7g} ~ {high:.7g}</dd></div>"
+            f"<div><dt>가운데 50% (Q1–Q3)</dt><dd>{q1:.7g} ~ {q3:.7g}</dd></div>"
+            f"<div><dt>사분위 범위 (IQR)</dt><dd>{q3 - q1:.7g}</dd></div>"
+            "</dl></div>"
+        )
+
+    interval = '—'
+    interval_note = ''
+    if values.size >= 2:
+        lower, upper = mean_confidence_interval(np.mean(values), np.std(values, ddof=1), values.size)
+        if np.isfinite([lower, upper]).all():
+            interval = f'{lower:.7g} ~ {upper:.7g}'
+            has_control_signal = any(it.get(key, 0) for key in ('x_ctrl_violation_count', 'r_ctrl_violation_count'))
+            has_control_signal = has_control_signal or any((it.get('ksq_counts') or {}).values())
+            if record.get('status') == 'rejected' or has_control_signal:
+                interval_note = " <span class='warn'>참고값</span>"
+
+    observed = fmt_ppm(it.get('emp_ppm'))
+    if observed != '—':
+        observed += ' PPM'
+        original_n = it.get('original_n')
+        if original_n is None and it.get('original_series') is not None:
+            original_n = np.count_nonzero(np.isfinite(it['original_series']))
+        count = it.get('spec_violation_count')
+        if original_n and count is not None:
+            observed += f' ({count:,}건 / {original_n:,}개)'
+    predicted_value = it.get('ppm_ppk')
+    predicted = fmt_ppm(predicted_value)
+    if predicted != '—':
+        predicted = '<0.001' if 0 < float(predicted_value) < .001 else predicted
+        predicted += ' PPM (모형 추정)'
+
+    return (
+        f"{spread}<div class='distribution-spread distribution-estimates'><h4>평균 추정</h4><dl>"
+        f"<div><dt>평균의 95% 신뢰구간</dt><dd>{interval}{interval_note}</dd></div>"
+        f"</dl></div><div class='distribution-spread distribution-estimates'><h4>규격 이탈</h4><dl>"
+        f"<div><dt>실측 PPM</dt><dd>{escape(observed)}</dd></div>"
+        f"<div><dt>예측 PPM (전체산포)</dt><dd>{escape(predicted)}</dd></div>"
+        "</dl></div>"
+    )
+
+
+def _distribution_summary(it, *, inline=False):
+    from html import escape
+    from spc_normality import STATUS_LABELS, pvalue_text, shape_text
+
+    transformed = it.get('box_cox_applied')
+    key = 'transformed' if transformed else 'individual'
+    record = (it.get('normality_diagnostics') or {}).get(key) or {}
+    test = record.get('test')
+    status = STATUS_LABELS.get(record.get('status'), '검정 불가')
+    p_value = pvalue_text(record.get('pvalue'))
+    p_label = f"p {p_value}" if p_value.startswith('<') else f"p = {p_value}"
+    verdict = f"{status} ({p_label})" if p_value != '—' else status
+    verdict_class = ' bad' if record.get('status') == 'rejected' else ''
+    rows = [('검정법', test)] if test else []
+    if test == 'Anderson-Darling':
+        rows.append(('정규분포 AD', _report_fmt_value(record.get('statistic'))))
+    rows.extend([
+        ('왜도', shape_text(record.get('skewness'))),
+        ('첨도', shape_text(record.get('kurtosis'))),
+    ])
+    model = it.get('distribution_model') if it.get('distribution_mode') == 'nonnormal' else None
+    if model and model.get('name'):
+        rows.append(('적합 분포', f"{model['name']} · AD {_report_fmt_value(model.get('ad'))}"))
+    entries = ''.join(f'<div><dt>{label}</dt><dd>{escape(value)}</dd></div>' for label, value in rows)
+    unit = '변환값' if transformed else '개별 측정값'
+    summary_class = ' distribution-inline' if inline else ''
+    title = '' if inline else f"<h4>분포 진단 요약 · {unit}</h4>"
+    inline_unit = f"<small>{unit}</small>" if inline else ''
+    extra_metrics = '' if inline else _distribution_detail_metrics(it, record)
+    return (f"<aside class='distribution-summary{summary_class}'>{title}{inline_unit}"
+            f"<strong class='distribution-verdict{verdict_class}'>{escape(verdict)}</strong>"
+            f"<dl>{entries}</dl>{extra_metrics}</aside>")
+
+
+def _report_qr_html(share_url, meta, generated_at, variable_count):
+    from html import escape
+    from urllib.parse import urlsplit
+
+    import qrcode
+    from qrcode.exceptions import DataOverflowError
+    from qrcode.image.svg import SvgPathFillImage
+
+    share_url = share_url.strip()
+    if share_url:
+        try:
+            parsed = urlsplit(share_url)
+            valid = (parsed.scheme in ('http', 'https') and parsed.hostname and not parsed.username
+                     and not any(char.isspace() or ord(char) < 32 for char in share_url))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError('QR 공유 주소는 http:// 또는 https://로 시작하는 전체 주소를 입력하세요.')
+        payload = share_url
+        caption = '보고서 공유 링크'
+    else:
+        fields = (
+            ('분석 ID', meta.get('analysis_id')),
+            ('데이터', meta.get('data_name')),
+            ('분석시각', meta.get('analyzed_at') or generated_at),
+            ('변수 수', variable_count),
+        )
+        payload = '\n'.join(['SPC 분석 결과 리포트', *(f'{key}: {value}' for key, value in fields if value or value == 0)])
+        caption = '보고서 식별 정보'
+
+    try:
+        qr = qrcode.make(payload, image_factory=SvgPathFillImage)
+    except DataOverflowError as exc:
+        raise ValueError('QR에 담을 정보가 너무 깁니다. 짧은 공유 주소를 입력하세요.') from exc
+    encoded = base64.b64encode(qr.to_string()).decode('ascii')
+    image_html = f"<img src='data:image/svg+xml;base64,{encoded}' alt='{caption} QR 코드'>"
+    if share_url:
+        image_html = f"<a href='{escape(share_url, quote=True)}'>{image_html}</a>"
+    return f"<figure class='report-qr'>{image_html}<figcaption>{caption}</figcaption></figure>"
 
 
 @day_guard
@@ -658,6 +898,9 @@ def export_analysis_html(
     include_histogram: bool = True,
     include_qq: bool = False,
     include_hist_qq: bool = False,
+    *,
+    qr_share_url: Optional[str] = None,
+    published: bool = False,
 ) -> bytes:
     """분석 결과를 단일 HTML 리포트로 내보내기."""
     analysis_meta = {**summary_df.attrs.get('audit', {}), **(analysis_meta or {})}
@@ -666,123 +909,282 @@ def export_analysis_html(
     import matplotlib.pyplot as plt
     from spc_charts import build_control_chart, build_histogram, build_qq_plot
 
-    _df, cap_cols, ppm_cols, cnt_cols = _report_summary_spec(summary_df)
+    source_df, _, _, _ = _report_summary_spec(summary_df)
+    result_by_name = {str(it['column']): it for it in results}
+    extended_monitors = _extended_report_monitors(results)
+    detail_ids = {str(it['column']): f'variable-{index}' for index, it in enumerate(results)}
+    row_items = [result_by_name.get(str(name)) for name in source_df.get('변수', [])]
+    pairs = [screening_index_pair(it) for it in row_items]
+    for column, key in (('평가 상태', 'state'), ('폭 지수', 'width'), ('치우침 반영 지수', 'shifted')):
+        source_df[column] = [pair[key] for pair in pairs]
+    source_df['판정'] = [assess_process(it)['text'] if it is not None else '계산 불가' for it in row_items]
+    source_df['관리이탈'] = [sum(it.get(key + ('_monitor' if it.get('control_phase') == 'phase2' else ''), 0)
+                                    for key in ('x_ctrl_violation_count', 'r_ctrl_violation_count'))
+                              if it is not None else None for it in row_items]
+    _apply_extended_monitor_summary(source_df, extended_monitors)
+    # Keep the full screening list; additional diagnostic fields belong in details.
+    summary_columns = [
+        '변수', '평가 상태', '판정', 'N', '폭 지수', '치우침 반영 지수', '신뢰도', '관리도', '평균', 'σ(전체)', 'σ(군내)',
+        'Cp', 'Cpk', 'Cw', 'Cwk', 'PPM(Within)', 'Pp', 'Ppk', 'PPM(Overall)',
+        'Cpm', 'Cpmk', '목표치(T)', '안정성', '군내/전체 지수 비율',
+        'PPM(실측)', '규격이탈', '운영모드', 'X관리이탈', 'R관리이탈',
+        '최근규격이탈', '최근관리이탈', '이상치제거', '관리이탈',
+        '정규성 검정법', '정규성 p값', '정규성 판정',
+    ]
+    for key in ('Cw', 'Cwk'):
+        if key not in source_df.columns:
+            source_df[key] = [result_by_name.get(str(name), {}).get(key.lower())
+                              for name in source_df.get('변수', pd.Series(index=source_df.index, dtype=str))]
+    _df = source_df[[col for col in summary_columns if col in source_df.columns]].copy()
+    cap_cols = [col for col in ('Cp', 'Cpk', 'Pp', 'Ppk', 'Cpm', 'Cpmk') if col in _df.columns]
+    ppm_cols = [col for col in _df.columns if 'PPM' in col]
+    cnt_cols = [col for col in _df.columns if '이탈' in col or '위반' in col]
 
-    def _cell_html(col, val):
-        sval, cls = _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols, results[0] if results else None)
-        if cls == "na" and sval == "—":
-            return "<span class='na'>—</span>"
+    from spc_policy import reference_only_decision, REFERENCE_COMPARISON_LABEL
+
+    def _cell_html(col, val, item):
+        if col in ('폭 지수', '치우침 반영 지수'):
+            pair = screening_index_pair(item)
+            metric = pair['width_metric' if col == '폭 지수' else 'shifted_metric']
+            cls = _report_metric_cls(item.get(metric), item, metric) if item and metric else 'na'
+            cell = f"<span class='{cls}'>{escape(str(val))}</span>"
+            decision = (item or {}).get('capability_criteria', {}).get('indices', {}).get(metric, {})
+            if reference_only_decision(decision):
+                cell += f"<small class='summary-target'>{REFERENCE_COMPARISON_LABEL}</small>"
+            elif decision.get('required') is not None:
+                cell += f"<small class='summary-target'>조정 목표값 {decision['required']:.3f}</small>"
+            return cell
+        sval, cls = _report_cell_display(col, val, cap_cols, ppm_cols, cnt_cols, item)
+        if col in cap_cols and val is not None:
+            sval = _report_fmt_value(val)
         esc = escape(sval)
-        return f"<span class='{cls}'>{esc}</span>" if cls and cls != "na" else esc
+        if col == '변수' and str(val) in detail_ids:
+            esc = f"<a href='#{detail_ids[str(val)]}'>{esc}</a>"
+        cell = f"<span class='{cls}'>{esc}</span>" if cls else esc
+        if item and col in cap_cols:
+            d = item.get('capability_criteria', {}).get('indices', {}).get(col.lower())
+            if d and reference_only_decision(d):
+                cell += f"<small class='summary-target'>{REFERENCE_COMPARISON_LABEL}</small>"
+            elif d and d.get('required') is not None:
+                cell += f"<small class='summary-target'>조정 목표값 {d['required']:.3f}</small>"
+        return cell
 
-    text_cols = {"변수", "판정", "신뢰도", "관리도", "운영모드"}
+    text_cols = {"변수", "평가 상태", "판정", "신뢰도", "관리도", "운영모드"}
+    summary_views = {
+        'core': ('핵심 요약', {'변수', '평가 상태', 'N', '폭 지수', '치우침 반영 지수', '규격이탈', '관리이탈'}),
+        'capability': ('능력 지표', {'변수', '판정', 'Cp', 'Cpk', 'Cw', 'Cwk', 'Pp', 'Ppk', 'Cpm', 'Cpmk'}),
+        'statistics': ('통계·정규성', {'변수', '평균', 'σ(전체)', 'σ(군내)', '정규성 검정법', '정규성 p값', '정규성 판정'}),
+        'all': ('전체 정보', set(_df.columns)),
+    }
+    summary_controls_html = '<div class="summary-controls" role="group" aria-label="표시 항목">' + ''.join(
+        f'<button type="button" data-summary-view="{key}" aria-pressed="{"true" if key == "core" else "false"}">{label}</button>'
+        for key, (label, _) in summary_views.items()) + '</div>'
 
     def _col_class(col) -> str:
-        return " class='text'" if str(col) in text_cols else ""
+        classes = ['text'] if str(col) in text_cols else []
+        classes += [f'view-{key}' for key, (_, columns) in summary_views.items() if col in columns]
+        if col in ('변수', '판정'):
+            classes.append('pin-name' if col == '변수' else 'pin-status')
+        if col == '평가 상태':
+            classes.append('pin-evaluation')
+        return f" class='{' '.join(classes)}'"
 
-    th = "".join([f"<th{_col_class(c)}>{escape(str(c))}</th>" for c in _df.columns])
+    control_headers = {'X관리이탈': '평균 관리이탈', 'R관리이탈': '산포 관리이탈'} if extended_monitors else {}
+    extended_summary_note = ('<p class="meta">확장 슈하르트의 관리이탈은 감시구간의 확장 X̄와 S 이탈 건수를 합산합니다.</p>'
+                             if extended_monitors else '')
+    th = "".join(f"<th{_col_class(c)}>{escape(control_headers.get(c, str(c)))}</th>" for c in _df.columns)
     trs = []
     for _, row in _df.iterrows():
-        tds = "".join([f"<td{_col_class(c)}>{_cell_html(c, row[c])}</td>" for c in _df.columns])
+        item = result_by_name.get(str(row.get('변수', '')))
+        tds = "".join([f"<td{_col_class(c)}>{_cell_html(c, row[c], item)}</td>" for c in _df.columns])
         trs.append(f"<tr>{tds}</tr>")
-    summary_table_html = f"<table class='summary'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
+    summary_table_html = f"<table class='summary' id='screening-summary' data-view='core'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
 
     detail_html = []
     for it in results:
-        detail = _report_variable_detail(it)
+        detail = _report_variable_detail(it, extended_monitors.get(str(it['column'])))
         col = escape(detail["column"])
         risk_cls = detail["risk_cls"]
-        norm_msg = escape(detail["norm_msg"])
         within_note = escape(detail["within_note"])
         capability_note = escape(detail["capability_note"])
         performance_note = escape(detail["performance_note"])
 
-        metric_cards = []
-        for key, val, cls in detail["metric_items"]:
-            cls_attr = f" {cls}" if cls else ""
-            metric_cards.append(
-                f"<div class='metric'><div class='k'>{escape(str(key))}</div><div class='v{cls_attr}'>{escape(str(val))}</div></div>"
+        metric_cards = ''.join(
+            f"<div class='metric'><div class='k'>{escape(key)}</div>"
+            f"<div class='v {cls}'>{escape(str(val))}</div></div>"
+            for key, val, cls in detail["core_metrics"]
+        )
+        metric_tables = []
+        for title, items in detail["metric_groups"]:
+            rows = ''.join(
+                f"<tr><th scope='row'>{escape(key)}</th><td><span class='{cls}'>{escape(str(val))}</span></td></tr>"
+                for key, val, cls in items
             )
+            metric_tables.append(f"<table><caption>{escape(title)}</caption><tbody>{rows}</tbody></table>")
 
         chart_main_html = ""
-        histogram_html = ""
-        chart_sub_html = ""
-        if include_charts:
-            try:
-                fig = build_control_chart(
-                    it,
-                    palette=palette,
-                    ksq_toggles=ksq_toggles,
-                    show_zones=show_zones,
-                    figsize=(11, 7.2),
-                )
-                png = fig_to_bytes(fig, fmt='png', dpi=140)
-                plt.close(fig)
-                b64 = base64.b64encode(png).decode("ascii")
-                chart_main_html = f"<img class='chart chart-main' loading='lazy' decoding='async' alt='control-{col}' src='data:image/png;base64,{b64}'/>"
-            except Exception:
-                pass
+        is_extended = it.get("chart_usage_mode") == EXTENDED_MODE
+        group_count = len(it.get('means', []))
+        wide_px = min(3200, group_count * 18) if group_count > 65 else 0
+        has_distribution_plots = include_histogram or include_qq or include_hist_qq
+        if include_charts and not is_extended:
+            def control_svg(figsize, display_mode='detail'):
+                fig = build_control_chart(it, palette=palette, ksq_toggles=ksq_toggles,
+                                          show_zones=show_zones, figsize=figsize, display_mode=display_mode)
+                try:
+                    return base64.b64encode(fig_to_bytes(fig, fmt='svg')).decode('ascii')
+                finally:
+                    plt.close(fig)
 
-        if include_histogram or include_qq or include_hist_qq:
-            _sub_imgs = []
+            try:
+                standard_chart = control_svg((16.5, 7.2))
+                print_img = ''
+                if has_distribution_plots:
+                    try:
+                        print_chart = control_svg((17, 5.0), display_mode='print')
+                        print_img = (f"<img class='chart chart-main print-control' alt='{col} 관리도' "
+                                     f"src='data:image/svg+xml;base64,{print_chart}'>")
+                    except Exception:
+                        pass  # The standard image still fits within the print height limit.
+                wide_source = ''
+                if wide_px:
+                    try:
+                        wide_chart = control_svg((wide_px / 96, 7.2))
+                        wide_source = f"<source media='screen' srcset='data:image/svg+xml;base64,{wide_chart}'>"
+                    except Exception:
+                        wide_px = 0
+                scroll_attrs = " tabindex='0' role='region' aria-label='관리도 가로 스크롤'" if wide_px else ''
+                picture_class = " class='screen-control'" if print_img else ''
+                chart_main_html = (
+                    f"<div class='var-chart' style='--control-min-width:{wide_px}px'{scroll_attrs}>"
+                    f"<picture{picture_class}>{wide_source}<img class='chart chart-main' alt='{col} 관리도' "
+                    f"src='data:image/svg+xml;base64,{standard_chart}'></picture>{print_img}</div>"
+                )
+            except Exception:
+                chart_main_html = "<p class='chart-empty'>관리도 이미지를 생성할 수 없습니다.</p>"
+
+        subcharts = []
+        has_histogram = False
+        if has_distribution_plots:
             if include_histogram or include_hist_qq:
                 try:
-                    fig_h = build_histogram(it, palette=palette, bins=hist_bins, figsize=(4.5, 3.4))
-                    for ax in fig_h.axes:
-                        legend = ax.get_legend()
-                        if legend is not None:
-                            legend.remove()
-                    png_h = fig_to_bytes(fig_h, fmt='png', dpi=140)
-                    plt.close(fig_h)
-                    b64_h = base64.b64encode(png_h).decode("ascii")
-                    histogram_html = (
-                        f"<div class='side-chart'>"
-                        f"<img class='chart chart-side' loading='lazy' decoding='async' alt='hist-{col}' src='data:image/png;base64,{b64_h}'/>"
-                        f"</div>"
+                    def histogram_svg(range_mode, *, printing=False):
+                        size = (4.65, 1.51) if printing else (7.25, 3.55)
+                        fig = build_histogram(it, palette=palette, bins=hist_bins, figsize=size,
+                                              range_mode=range_mode, print_layout=printing,
+                                              report_layout=not printing)
+                        try:
+                            return base64.b64encode(fig_to_bytes(fig, fmt='svg', tight=False)).decode('ascii')
+                        finally:
+                            plt.close(fig)
+
+                    b64_h = histogram_svg('spec')
+                    zoom_histogram = ''
+                    controls = ''
+                    try:
+                        b64_zoom = histogram_svg('data')
+                        zoom_histogram = (f"<img class='chart chart-sub histogram-zoom' alt='{col} 히스토그램 · 분포 확대' "
+                                          f"src='data:image/svg+xml;base64,{b64_zoom}'>")
+                        mode_group = detail_ids[str(it['column'])] + '-histogram-mode'
+                        controls = (
+                            "<fieldset class='histogram-modes' aria-label='히스토그램 표시 범위'>"
+                            f"<label><input type='radio' name='{mode_group}' value='zoom' checked> 분포 확대</label>"
+                            f"<label><input type='radio' name='{mode_group}' value='spec'> 규격 전체</label></fieldset>"
+                        )
+                    except Exception:
+                        pass  # The full specification view is already available.
+                    print_histogram = ''
+                    try:
+                        b64_print_h = histogram_svg('spec', printing=True)
+                        print_histogram = (f"<img class='chart chart-sub print-histogram' alt='{col} 히스토그램' "
+                                           f"src='data:image/svg+xml;base64,{b64_print_h}'>")
+                    except Exception:
+                        pass  # Keep the standard histogram available for printing.
+                    screen_class = ' screen-histogram' if print_histogram else ''
+                    subcharts.append(
+                        f"<div class='subchart-block histogram-block'>"
+                        f"<div class='histogram-heading'><h4>히스토그램</h4>{controls}</div>"
+                        f"<img class='chart chart-sub histogram-spec{screen_class}' alt='{col} 히스토그램 · 규격 전체' "
+                        f"src='data:image/svg+xml;base64,{b64_h}'>{zoom_histogram}{print_histogram}</div>"
                     )
+                    has_histogram = True
                 except Exception:
                     pass
             if include_qq or include_hist_qq:
                 try:
                     fig_q = build_qq_plot(it, palette=palette)
-                    png_q = fig_to_bytes(fig_q, fmt='png', dpi=128)
-                    plt.close(fig_q)
-                    b64_q = base64.b64encode(png_q).decode("ascii")
-                    _sub_imgs.append(
+                    try:
+                        b64_q = base64.b64encode(fig_to_bytes(fig_q, fmt='svg')).decode('ascii')
+                    finally:
+                        plt.close(fig_q)
+                    subcharts.append(
                         f"<div class='subchart-block'><h4>Q-Q 플롯</h4>"
-                        f"<img class='chart chart-sub' loading='lazy' decoding='async' alt='qq-{col}' src='data:image/png;base64,{b64_q}'/>"
+                        f"<img class='chart chart-sub' alt='{col} Q-Q 플롯' src='data:image/svg+xml;base64,{b64_q}'/>"
                         f"</div>"
                     )
                 except Exception:
                     pass
-            if _sub_imgs:
-                chart_sub_html = f"<div class='subcharts'>{''.join(_sub_imgs)}</div>"
+        histogram_only = has_histogram and len(subcharts) == 1
+        distribution_summary = _distribution_summary(it, inline=not histogram_only) if subcharts else ''
+        side_summary = distribution_summary if histogram_only else ''
+        inline_summary = distribution_summary if not histogram_only else ''
+        text_diagnostics = diagnostics_html(it, compact=True) if not subcharts else ''
+        histogram_class = ' has-histogram' if has_histogram else ''
+        summary_class = ' has-distribution-summary' if histogram_only else ''
+        chart_sub_html = (
+            f"<section class='var-diagnostics'><h4>분포 진단 · {col}</h4>"
+            f"<div class='subcharts{histogram_class}{summary_class}'>{''.join(subcharts)}{side_summary}</div>"
+            f"{inline_summary}</section>"
+        ) if subcharts else ''
+        has_control_chart = chart_main_html.startswith('<div')
+        print_layout = ' with-distribution-plots' if has_control_chart and subcharts else ''
+        scroll_hint = "<p class='norm chart-scroll-hint'>차트가 화면보다 넓으면 좌우로 스크롤하세요.</p>" if wide_px and has_control_chart else ''
 
-        metrics_html = f"""
-        <div class="metrics">
-          {''.join(metric_cards)}
-        </div>
-        <div class="norm">정규성 (계산 단위): {norm_msg}</div>
-        {diagnostics_html(it)}
-        {histogram_html}
-        """
-
+        extended_html = ""
+        extended = it.get("extended_shewhart")
+        if extended is not None:
+            extended_image = ""
+            if include_charts:
+                from spc_charts import build_extended_figure
+                fig = build_extended_figure(extended, palette)
+                try:
+                    svg = base64.b64encode(fig_to_bytes(fig, "svg")).decode("ascii")
+                    extended_image = (f"<img class='chart extended-chart' alt='{EXTENDED_TITLE}' "
+                                      f"src='data:image/svg+xml;base64,{svg}'>")
+                finally:
+                    plt.close(fig)
+            extended_html = (
+                f"<section style='break-inside:avoid'><h4>{EXTENDED_TITLE}</h4>"
+                f"<p>{escape(calculation_note(extended))}</p><p>{EXTENDED_GUIDE}</p>"
+                f"{extended_image}</section>"
+            )
+        elif is_extended and it.get("extended_shewhart_error"):
+            extended_html = f"<p>{EXTENDED_TITLE} · {escape(it['extended_shewhart_error'])}</p>"
         detail_html.append(
-            f"<section class='var'>"
+            f"<section class='var{print_layout}' id='{detail_ids[str(it['column'])]}'>"
+            f"<div class='var-overview'>"
             f"<div class='var-heading'>"
             f"<div class='var-head'><h3>{col}</h3><span class='pill {risk_cls}'>{detail['risk_label']}</span></div>"
+            f"<div class='norm'>{escape(screening_index_pair(it)['state'])}</div></div>"
+            f"<div class='metrics core-metrics'>{metric_cards}</div>"
+            f"<div class='metric-tables'>{''.join(metric_tables)}</div>"
+            f"{text_diagnostics}"
+            f"<details class='analysis-notes'><summary>판정·분포 상세 설명</summary>"
             f"<div class='norm'>Cp·Cpk: {capability_note}</div>"
-            f"<div class='norm'>Cw·Cwk (진단용): {within_note}</div>"
-            f"<div class='norm'>{performance_note}</div></div>"
-            f"<div class='var-main'>"
-            f"<div class='var-side'>{metrics_html}</div>"
-            f"<div class='var-chart'>{chart_main_html if chart_main_html else '<div class=\"chart-empty\">차트 없음</div>'}</div>"
-            f"</div>"
+            f"<div class='norm'>Cw·Cwk: {within_note}</div>"
+            f"<div class='norm'>{performance_note}</div>"
+            f"{diagnostics_html(it)}</details>"
             f"{chart_sub_html}"
+            f"{scroll_hint}"
+            f"{chart_main_html}"
+            f"</div>"
+            f"{extended_html}"
             f"</section>"
         )
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    qr_html = _report_qr_html(qr_share_url, analysis_meta, now, len(results)) if qr_share_url is not None else ''
+    robots = '<meta name="robots" content="noindex, nofollow">' if published else ''
     meta_items = _report_meta_items(analysis_meta, now)
     meta_html = "".join(
         f"<div class='metric'><div class='k'>{escape(str(k))}</div><div class='v'>{escape(str(v))}</div></div>"
@@ -792,6 +1194,7 @@ def export_analysis_html(
 <html lang="ko">
 <head>
 <meta charset="utf-8"/>
+{robots}
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>SPC 분석 결과</title>
 <style>
@@ -819,6 +1222,9 @@ h1 {{ margin: 0 0 8px 0; font-size: 22px; }}
 h2 {{ margin: 0 0 8px 0; font-size: 16px; }}
 h3 {{ margin: 0; font-size: 15px; }}
 .meta {{ color:#475569; font-size:12px; margin-bottom:12px; }}
+.report-intro {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
+.report-qr {{ flex:0 0 auto; margin:0 0 8px; text-align:center; font-size:10px; }}
+.report-qr img {{ display:block; width:94px; height:94px; margin:0 auto; }}
 .card {{
   background:#fff; border:1.5px solid var(--border-medium); border-radius:10px; padding:12px; margin-bottom:12px;
 }}
@@ -829,9 +1235,23 @@ h3 {{ margin: 0; font-size: 15px; }}
   border-radius: 6px;
   background: #fff;
 }}
+.summary-controls {{ display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }}
+.summary-controls button {{ padding:8px 16px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; color:#334155; cursor:pointer; font:inherit; }}
+.summary-controls button[aria-pressed="true"] {{ background:#1e3a8a; color:#fff; border-color:#1e3a8a; }}
+.summary-controls button:focus-visible {{ outline:3px solid #60a5fa; outline-offset:2px; }}
+table.summary[data-view="core"] tr > :not(.view-core),
+table.summary[data-view="capability"] tr > :not(.view-capability),
+table.summary[data-view="statistics"] tr > :not(.view-statistics) {{ display:none; }}
+table.summary .pin-name {{ position:sticky; left:0; min-width:96px; max-width:96px; width:96px; box-sizing:border-box; z-index:2; }}
+table.summary .pin-status {{ position:sticky; left:96px; min-width:180px; max-width:220px; z-index:2; white-space:normal; }}
+table.summary th.pin-name, table.summary th.pin-status {{ z-index:3; }}
+table.summary[data-view="core"] .pin-evaluation {{ position:sticky; left:96px; min-width:180px; max-width:220px; z-index:2; white-space:normal; }}
+table.summary[data-view="core"] th.pin-evaluation {{ z-index:3; }}
+table.summary a {{ color:#1d4ed8; text-underline-offset:3px; }}
+.var {{ scroll-margin-top:16px; }}
 table.summary {{
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 11px;
   table-layout: auto;
@@ -858,6 +1278,8 @@ table.summary td {{
   border-bottom: 1px solid #d1d5db;
 }}
 table.summary td:last-child {{ border-right: none; }}
+table.summary td:first-child, table.summary td:last-child {{white-space:normal;overflow-wrap:anywhere;}}
+.summary-target {{display:block;font-size:11px;color:#475569;margin-top:4px;font-weight:400;}}
 table.summary tbody tr:last-child td {{ border-bottom: none; }}
 table.summary thead tr:first-child th:first-child {{ border-top-left-radius: 5px; }}
 table.summary thead tr:first-child th:last-child {{ border-top-right-radius: 5px; }}
@@ -896,29 +1318,18 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
 .pill.good {{ color:#166534; background:#dcfce7; }}
 .pill.warn {{ color:#92400e; background:#fef3c7; }}
 .pill.bad {{ color:#991b1b; background:#fee2e2; }}
-.var-main {{
-  display:grid;
-  grid-template-columns: 300px 1fr;
-  gap:10px;
-  align-items:stretch;
-}}
-.var-side {{
-  border:1.5px solid var(--border-medium);
-  border-radius:8px;
-  padding:8px;
-  background:#f8fafc;
-  display:flex;
-  flex-direction:column;
-  min-height:0;
-}}
 .var-chart {{
   min-width:0;
-  display:flex;
-  align-items:stretch;
-  min-height:420px;
+  overflow-x:auto;
+  margin-top:10px;
 }}
+.var-chart picture {{ display:block; min-width:var(--control-min-width, 0px); }}
+.var-chart .print-control {{ display:none; }}
+.var-chart:focus-visible {{ outline:2px solid #1d4ed8; outline-offset:2px; }}
+.analysis-notes {{ margin:8px 0; }}
+.analysis-notes summary {{ cursor:pointer; }}
 .metrics {{
-  display:grid; grid-template-columns: repeat(2, minmax(100px,1fr)); gap:6px; margin-bottom:6px;
+  display:grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 126px), 1fr)); gap:6px; margin-bottom:6px;
 }}
 .meta-metrics {{
   grid-template-columns: repeat(3, minmax(120px, 1fr));
@@ -926,49 +1337,131 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
 .metric {{
   border:1px solid var(--border-medium); border-radius:8px; padding:6px; background:#fff;
 }}
-.metric .k {{ font-size:10px; color:#64748b; margin-bottom:2px; }}
+.metric .k {{ font-size:12px; color:#475569; margin-bottom:3px; }}
 .metric .v {{ font-size:14px; font-weight:700; line-height:1.15; }}
-.norm {{ font-size:11px; color:#334155; margin-bottom:6px; }}
-.side-chart {{
-  flex:1;
-  display:flex;
-  min-height:180px;
-  margin-top:4px;
+.core-metrics {{ grid-template-columns:repeat(7, minmax(0, 1fr)); }}
+.core-metrics .metric:has(.v.bad) {{
+  border-color:#dc2626;
+  border-inline-start-width:3px;
 }}
+.metric-tables {{
+  display:grid;
+  grid-template-columns:minmax(0, 1.6fr) repeat(2, minmax(0, 1fr));
+  align-items:start;
+  gap:12px;
+  margin:8px 0;
+}}
+.metric-tables table {{
+  width:100%;
+  border-collapse:collapse;
+  font-size:12px;
+  font-variant-numeric:tabular-nums;
+}}
+.metric-tables caption {{
+  background:#eef2f7;
+  color:#0f172a;
+  text-align:left;
+  font-weight:700;
+  padding:4px 6px;
+  border-bottom:1px solid #94a3b8;
+}}
+.metric-tables th, .metric-tables td {{
+  padding:3px 6px;
+  border-bottom:1px solid #e2e8f0;
+}}
+.metric-tables th {{ text-align:left; font-weight:400; color:#334155; }}
+.metric-tables td {{ text-align:right; font-weight:700; }}
+.norm {{ font-size:11px; color:#334155; margin-bottom:6px; }}
 .chart {{
   width:100%; display:block; margin:0; border:1.5px solid var(--border-strong); border-radius:8px; background:#fff;
 }}
-.chart-main {{ width:100%; height:100%; object-fit:contain; }}
-.chart-side {{ width:100%; height:100%; object-fit:contain; }}
+.chart-main, .chart-sub {{ height:auto; }}
+.chart.print-histogram, .chart.histogram-zoom {{ display:none; }}
+.histogram-heading {{
+  display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:4px 12px;
+}}
+.histogram-modes {{
+  display:flex; flex-wrap:wrap; gap:4px 12px; margin:0 0 8px; padding:0; border:0; min-width:0;
+}}
+.histogram-modes label {{ display:inline-flex; align-items:center; gap:4px; cursor:pointer; }}
+.histogram-modes input {{ margin:0; accent-color:#1d4ed8; }}
+.var-diagnostics {{ margin:10px 0; }}
+.var-diagnostics > h4 {{ margin:0 0 6px; font-size:14px; }}
 .subcharts {{
   margin-top:8px;
   display:grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 390px));
   gap:8px;
 }}
 .subchart-block {{ min-width:0; }}
-.subchart-block:only-child {{ grid-column: 1 / -1; }}
+.subchart-block:only-child {{ grid-column: 1 / -1; width:min(100%, 440px); }}
 .subchart-block h4 {{ margin: 0 0 4px 0; font-size: 12px; color:#0f172a; }}
+.has-distribution-summary {{ grid-template-columns:minmax(0, 440px) minmax(0, 1fr); gap:12px; }}
+.histogram-block, .distribution-summary {{
+  padding:9px 12px; border:1px solid var(--border-medium); border-radius:8px; background:#fff;
+}}
+.histogram-block .chart {{ border:0; }}
+.distribution-summary h4 {{ margin:0 0 4px; font-size:12px; color:#0f172a; }}
+.distribution-verdict {{ display:inline-block; font-size:14px; }}
+.distribution-summary dl {{
+  margin:8px 0 0; display:grid; grid-template-columns:max-content minmax(0,1fr);
+  gap:4px 12px; font-size:12px;
+}}
+.distribution-summary dt {{ color:#334155; }}
+.distribution-summary dd {{ margin:0; font-weight:700; }}
+.distribution-spread {{ margin-top:16px; padding-top:12px; border-top:1px solid #dbe2ea; }}
+.distribution-inline {{
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px;
+  margin-top:6px; padding:4px 8px;
+}}
+.distribution-inline .distribution-verdict, .distribution-inline small {{ font-size:12px; }}
+.distribution-inline dl {{
+  display:flex; flex-wrap:wrap; gap:2px 8px; margin:0;
+}}
+.distribution-summary dl > div {{ display:contents; }}
+.distribution-inline dl > div {{ display:flex; gap:4px; margin-inline-end:6px; }}
+.distribution-inline dl > div:last-child {{ margin-inline-end:0; }}
 .chart-sub {{ width:100%; object-fit:contain; }}
 .chart-empty {{
-  border:1px dashed #cbd5e1; border-radius:8px; min-height:100%;
-  width:100%;
-  display:flex; align-items:center; justify-content:center; color:#64748b; background:#f8fafc;
+  border:1px dashed #cbd5e1; border-radius:8px; padding:12px;
+  color:#475569; background:#f8fafc;
 }}
 .print-note {{
   display:none;
 }}
 @media (max-width: 900px) {{
   .page {{ max-width: 100%; }}
-  .var-main {{ grid-template-columns: 1fr; }}
-  .subcharts {{ grid-template-columns: 1fr; }}
-  .meta-metrics {{ grid-template-columns: repeat(2, minmax(120px, 1fr)); }}
+}}
+@media screen {{
+  .has-distribution-summary {{ grid-template-columns:minmax(0, 2fr) minmax(250px, 1fr); }}
+  .has-distribution-summary .distribution-summary {{ align-self:start; }}
+  .histogram-block:has(input[value="zoom"]:checked) .chart.histogram-zoom {{ display:block; }}
+  .histogram-block:has(input[value="zoom"]:checked) .chart.histogram-spec {{ display:none; }}
+  .subcharts.has-histogram:not(.has-distribution-summary) {{
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+  }}
+  .has-histogram:not(.has-distribution-summary) .subchart-block {{
+    padding:9px 12px; border:1px solid var(--border-medium); border-radius:8px; background:#fff;
+  }}
+  .has-histogram:not(.has-distribution-summary) .chart {{ border:0; }}
+}}
+@media screen and (max-width: 760px) {{
+  .subcharts {{ grid-template-columns: minmax(0, 390px); }}
+  .has-distribution-summary, .subcharts.has-histogram:not(.has-distribution-summary) {{
+    grid-template-columns:minmax(0, 1fr);
+  }}
+  .core-metrics {{ grid-template-columns:repeat(auto-fit, minmax(min(100%, 118px), 1fr)); }}
+  .metric-tables {{ grid-template-columns:1fr; }}
+  .meta-metrics {{ grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); }}
 }}
 @page {{
   size: A4 landscape;
   margin: 6mm;
 }}
 @media print {{
+  .summary-controls, .summary-screen-hint, .chart-scroll-hint {{ display:none !important; }}
+  table.summary tr > th, table.summary tr > td {{ display:table-cell !important; }}
+  table.summary .pin-name, table.summary .pin-status, table.summary .pin-evaluation {{ position:static !important; min-width:0 !important; max-width:none !important; width:auto !important; }}
   * {{
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
@@ -994,6 +1487,7 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
     color: #64748b;
     margin-bottom: 8px;
   }}
+  .report-qr img {{ width:24mm; height:24mm; }}
   h1 {{ font-size: 18pt; }}
   h2, .details-heading {{ font-size: 12pt; }}
   h3 {{ font-size: 11pt; }}
@@ -1084,47 +1578,29 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
   }}
   .print-details .var {{
     break-before: page;
-    page-break-before: always;
     break-inside: avoid;
-    page-break-inside: avoid;
     margin-top: 0;
     padding: 3mm;
-    height: calc(var(--a4-landscape-h) - (var(--print-margin) * 2) - 1mm);
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    gap: 2mm;
-    box-sizing: border-box;
     border: 1pt solid #1e293b !important;
   }}
+  .var-overview {{ break-inside: avoid; }}
+  .var .analysis-notes {{ display:none; }}
   .var-head {{
     margin-bottom: 0;
     padding-bottom: 2mm;
     flex: 0 0 auto;
     border-bottom: 0.9pt solid #334155 !important;
   }}
-  .var-main {{
-    flex: 1 1 auto;
-    display: grid;
-    grid-template-columns: 74mm 1fr;
-    gap: 3mm;
-    align-items: stretch;
-    min-height: 0;
-  }}
-  .var-side {{
-    padding: 2mm;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border: 0.9pt solid #334155 !important;
-    background: #f8fafc !important;
-  }}
   .var-chart {{
-    min-height: 0;
-    height: 100%;
-    display: flex;
+    overflow: visible;
+    margin-top: 2mm;
+    break-inside: avoid;
   }}
+  .var-chart picture {{ min-width:0; }}
+  .var-chart .screen-control {{ display:none; }}
+  .var-chart .print-control {{ display:block; }}
   .metrics {{
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: 1mm;
     margin-bottom: 2mm;
   }}
@@ -1138,18 +1614,15 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
   }}
   .metric .k {{ font-size: 7.5pt; }}
   .metric .v {{ font-size: 9.5pt; }}
+  .core-metrics .metric:has(.v.bad) {{ border-inline-start:2pt solid #991b1b !important; }}
+  .metric-tables {{ gap:3mm; margin:1mm 0; break-inside:avoid; }}
+  .metric-tables table {{ font-size:8pt; line-height:1.1; }}
+  .metric-tables caption {{ padding:0.4mm 1mm; }}
+  .metric-tables th, .metric-tables td {{ padding:0.1mm 1mm; }}
   .norm {{ font-size: 8pt; margin-bottom: 2mm; }}
-  .side-chart {{
-    flex: 1 1 auto;
-    min-height: 0;
-    height: 0;
-    margin-top: 2mm;
-    display: flex;
-  }}
   .chart {{
     width: 100%;
-    height: 100%;
-    max-height: none !important;
+    height: auto;
     border: 0.9pt solid #1e293b !important;
     border-radius: 4px;
     background: #fff;
@@ -1157,22 +1630,51 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
     break-inside: avoid;
     page-break-inside: avoid;
   }}
-  .chart-main, .chart-side, .chart-sub {{
-    width: 100%;
-    height: 100%;
-    max-height: none !important;
-    object-fit: contain;
+  .chart-main {{ max-height: 150mm; }}
+  .extended-chart {{ max-height: 135mm; }}
+  .chart-sub {{ max-height: 110mm; }}
+  .with-distribution-plots .chart-main {{ max-height: 88mm; }}
+  .with-distribution-plots .chart-sub {{ max-height: 42mm; }}
+  .with-distribution-plots .subcharts {{ grid-template-columns:repeat(2, minmax(0, 61mm)); }}
+  .with-distribution-plots .subchart-block:only-child {{ width:min(100%, 61mm); }}
+  .var .has-histogram {{ grid-template-columns:minmax(0, 118mm) minmax(0, 61mm); }}
+  .var .has-distribution-summary {{ grid-template-columns:minmax(0, 118mm) minmax(0, 1fr); gap:4mm; }}
+  .var .has-distribution-summary .subchart-block {{ grid-column:auto; width:100%; }}
+  .chart.screen-histogram {{ display:none; }}
+  .histogram-modes, .distribution-spread:not(.distribution-estimates), .distribution-estimates h4 {{ display:none; }}
+  .distribution-estimates {{ margin-top:0.6mm; padding-top:0.6mm; }}
+  .histogram-block .chart.print-histogram {{ display:block; border:0 !important; border-radius:0; }}
+  .distribution-summary, .histogram-block {{
+    border:0.75pt solid #64748b;
+    border-radius:4px; padding:1mm 2mm; color:#0f172a;
   }}
+  .var .subchart-block h4, .distribution-summary h4 {{ margin:0 0 0.6mm; font-size:9pt; }}
+  .distribution-verdict {{ font-size:10pt; }}
+  .distribution-summary dl {{
+    margin:1.2mm 0 0;
+    gap:1mm 3mm; font-size:9pt;
+  }}
+  .distribution-summary.distribution-inline {{
+    margin-top:1mm; padding:0 0.5mm; border:0; gap:0.5mm 2mm;
+  }}
+  .distribution-inline .distribution-verdict, .distribution-inline small,
+  .distribution-inline dl {{ font-size:8pt; line-height:1.1; }}
+  .distribution-inline dl {{ margin:0; gap:0.5mm 1mm; }}
+  .with-distribution-plots .metrics {{ margin-bottom:1mm; gap:0.8mm; }}
+  .with-distribution-plots .metric {{ padding:0.6mm; }}
+  .with-distribution-plots .metric .k {{ margin-bottom:0; font-size:7pt; line-height:1.15; }}
+  .with-distribution-plots .metric .v {{ font-size:8.5pt; line-height:1.15; }}
+  .with-distribution-plots .var-head {{ padding-bottom:1mm; }}
+  .with-distribution-plots .norm {{ margin-bottom:1mm; }}
+  .with-distribution-plots .var-diagnostics > h4 {{ font-size:9pt; margin:0; }}
+  .var-diagnostics {{ margin: 0; padding-top: 2mm; break-inside:avoid; }}
   .subcharts {{
-    flex: 0 0 auto;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 2mm;
     margin-top: 2mm;
-    max-height: 42mm;
   }}
   .subchart-block h4 {{ font-size: 8.5pt; margin: 0 0 1mm 0; }}
-  .chart-empty {{ min-height: 100%; }}
 }}
 </style>
 </head>
@@ -1180,9 +1682,14 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
   <div class="page">
   <header class="print-cover">
   <div class="print-note">인쇄 설정: A4, 가로, 배경 그래픽 켜기</div>
-  <h1>SPC 분석 결과 리포트</h1>
-  <div class="meta">생성 시각: {escape(now)} · 변수 수: {len(results):,}개</div>
-  <div class="meta">실측 PPM·규격이탈은 전처리 전 원본 유효 측정값 기준입니다. 관리도·능력 지수는 분석 대상 데이터 기준입니다.</div>
+  <div class="report-intro">
+    <div>
+      <h1>SPC 분석 결과 리포트</h1>
+      <div class="meta">생성 시각: {escape(now)} · 변수 수: {len(results):,}개</div>
+      <div class="meta">실측 PPM·규격이탈은 전처리 전 원본 유효 측정값 기준입니다. 관리도·능력 지수는 분석 대상 데이터 기준입니다.</div>
+    </div>
+    {qr_html}
+  </div>
   <div class="card">
     <h2>분석 조건 요약</h2>
     <div class="metrics meta-metrics">{meta_html}</div>
@@ -1190,7 +1697,11 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
   </header>
   <section class="card print-summary">
     <h2>선별 요약</h2>
-    <p class="norm">{escape(WITHIN_CAPABILITY_NOTICE)}</p>
+    <p class="meta">지수 아래는 조정 목표값입니다. 자세한 진단은 항목별 결과에서 확인하세요.</p>
+    {summary_controls_html}
+    <p class="meta summary-screen-hint">핵심 요약은 능력 적용 가능 시 Cp·Cpk, 그 외에는 Pp·Ppk 참고값을 표시합니다. 변수명을 누르면 상세 정보와 관리도로 이동합니다. 인쇄·PDF에는 전체 요약 열이 표시됩니다.</p>
+    {extended_summary_note}
+    <details><summary>지수 해석 안내</summary><p class="norm">{escape(WITHIN_CAPABILITY_NOTICE)}</p></details>
     <div class="summary-wrap">{summary_table_html}</div>
   </section>
   <section class="print-details">
@@ -1198,10 +1709,56 @@ table.summary tbody tr:last-child td:last-child {{ border-bottom-right-radius: 5
     {''.join(detail_html)}
   </section>
   </div>
+<script>
+document.querySelectorAll('[data-summary-view]').forEach(function(button) {{
+  button.addEventListener('click', function() {{
+    document.getElementById('screening-summary').dataset.view = button.dataset.summaryView;
+    document.querySelectorAll('[data-summary-view]').forEach(function(other) {{
+      other.setAttribute('aria-pressed', String(other === button));
+    }});
+  }});
+}});
+</script>
 </body>
 </html>"""
 
     return html_doc.encode("utf-8")
+
+
+def publish_analysis_html(report_dir: str, public_base_url: str, **export_options) -> Tuple[str, bytes]:
+    """Write an HTML report to a configured static web directory and return its URL."""
+    import os
+    import secrets
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+    from urllib.parse import urlsplit
+
+    if not report_dir.strip():
+        raise ValueError('공개 보고서 저장 폴더를 설정하세요.')
+    folder = Path(report_dir).resolve()
+    if not folder.is_dir():
+        raise ValueError('공개 보고서 저장 폴더에 접근할 수 없습니다.')
+    public_base_url = public_base_url.strip().rstrip('/')
+    address = urlsplit(public_base_url)
+    if (address.scheme != 'https' or not address.hostname or address.username
+            or address.query or address.fragment or any(char.isspace() for char in public_base_url)):
+        raise ValueError('공개 보고서 기본 주소를 HTTPS 경로로 설정하세요.')
+
+    filename = secrets.token_urlsafe(24) + '.html'
+    public_url = f'{public_base_url}/{filename}'
+    html = export_analysis_html(**export_options, qr_share_url=public_url, published=True)
+    temp_path = None
+    try:
+        with NamedTemporaryFile(dir=folder, prefix='.report-', suffix='.tmp', delete=False) as temp:
+            temp_path = Path(temp.name)
+            temp.write(html)
+        if os.name != 'nt':
+            temp_path.chmod(0o644)
+        os.replace(temp_path, folder / filename)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    return public_url, html
 
 
 def _render_html_file_to_pdf(html_path: str) -> bytes:
@@ -1312,9 +1869,9 @@ def html_bytes_to_pdf(html_bytes: bytes) -> bytes:
 
 
 @day_guard
-def fig_to_bytes(fig, fmt: str = 'png', dpi: int = 120) -> bytes:
+def fig_to_bytes(fig, fmt: str = 'png', dpi: int = 120, *, tight: bool = True) -> bytes:
     """Matplotlib Figure를 bytes로 변환 (Streamlit st.image 용)."""
     buf = io.BytesIO()
-    fig.savefig(buf, format=fmt, dpi=dpi, bbox_inches='tight')
+    fig.savefig(buf, format=fmt, dpi=dpi, bbox_inches='tight' if tight else None)
     buf.seek(0)
     return buf.getvalue()

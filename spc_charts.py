@@ -16,7 +16,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib.offsetbox import AnchoredText
-from matplotlib.ticker import AutoMinorLocator
+from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 from scipy import stats
 from typing import Any, Dict, Optional, Tuple
 
@@ -47,22 +47,22 @@ PALETTES = {
     'trust': {
         'primary': '#1E3A8A', 'accent': '#0E7490', 'success': '#0F766E',
         'warning': '#B45309', 'danger': '#B42318', 'muted': '#475569',
-        'mean': '#0EA5E9', 'usl': '#C2410C', 'lsl': '#1D4ED8',
+        'mean': '#0369A1', 'usl': '#C2410C', 'lsl': '#1D4ED8',
         'grid': '#D3DCE8',
         'zoneC': '#DCFCE7', 'zoneB': '#BAE6FD', 'zoneA': '#FEF08A', 'zone3': '#FECACA',
         'bg': '#F2F5FA', 'ax_bg': '#FFFFFF',
     },
     'analytics': {
-        'primary': '#1F6FEB', 'accent': '#0F766E', 'success': '#1D9A6C',
-        'warning': '#D97706', 'danger': '#C62828', 'muted': '#64748B',
-        'mean': '#EA8C00', 'usl': '#D9363E', 'lsl': '#2453A6',
+        'primary': '#1D4ED8', 'accent': '#0F766E', 'success': '#047857',
+        'warning': '#92400E', 'danger': '#B42318', 'muted': '#475569',
+        'mean': '#9A4B00', 'usl': '#B42318', 'lsl': '#2453A6',
         'grid': '#D6DFEA',
         'zoneC': '#D1FAE5', 'zoneB': '#BAE6FD', 'zoneA': '#FEF08A', 'zone3': '#FECACA',
         'bg': '#F4F7FB', 'ax_bg': '#FFFFFF',
     },
     'dark': {
         'primary': '#60A5FA', 'accent': '#22D3EE', 'success': '#34D399',
-        'warning': '#F59E0B', 'danger': '#F87171', 'muted': '#94A3B8',
+        'warning': '#FBBF24', 'danger': '#F87171', 'muted': '#CBD5E1',
         'mean': '#FBBF24', 'usl': '#FB7185', 'lsl': '#93C5FD',
         'grid': '#334155',
         'zoneC': '#064E3B', 'zoneB': '#451A03', 'zoneA': '#431407', 'zone3': '#450A0A',
@@ -74,6 +74,7 @@ DEFAULT_PALETTE = 'trust'
 
 def _apply_palette(palette_name: str = DEFAULT_PALETTE):
     p = PALETTES.get(palette_name, PALETTES[DEFAULT_PALETTE])
+    ink = '#E2E8F0' if palette_name == 'dark' else '#1E293B'
     plt.rcParams.update({
         'figure.facecolor': p['bg'],
         'axes.facecolor': p['ax_bg'],
@@ -81,6 +82,16 @@ def _apply_palette(palette_name: str = DEFAULT_PALETTE):
         'grid.color': p['grid'],
         'axes.grid': True,
         'grid.alpha': 0.7,
+        'text.color': ink,
+        'axes.labelcolor': ink,
+        'xtick.color': ink,
+        'ytick.color': ink,
+        'font.size': 11,
+        'axes.labelsize': 11,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'legend.fontsize': 10,
+        'legend.labelcolor': ink,
     })
     return p
 
@@ -97,7 +108,7 @@ def _side_label(ax, y: float, text: str, color: str, fontsize: float = 8):
     xmin, xmax = ax.get_xlim()
     x = xmin + 0.01 * (xmax - xmin)
     ax.text(x, y, text, color=color, ha='left', va='center', fontsize=fontsize,
-            bbox=dict(boxstyle='round,pad=0.2', fc='white', ec=color, lw=0.8, alpha=0.85),
+            bbox=dict(boxstyle='round,pad=0.2', fc=ax.get_facecolor(), ec=color, lw=0.8, alpha=1),
             zorder=6, clip_on=True)
 
 
@@ -133,6 +144,7 @@ def build_control_chart(
     KSQ T1~T8 洹쒖튃 ?꾨컲??留덊궧 ?ы븿.
     """
     C = _apply_palette(palette)
+    print_layout = str(display_mode).lower() == 'print'
     compact = str(display_mode).lower() == "compact"
     if compact and figsize == (12, 7):
         figsize = (12, 6.2)
@@ -193,9 +205,10 @@ def build_control_chart(
 
     spread = abs(ucl - lcl) if np.isfinite(ucl) and np.isfinite(lcl) else 1.0
     decimals = min(8, max(3, int(-math.floor(math.log10(spread))) + 2)) if spread > 0 else 3
-    fig.text(0.075, 0.97, f"{col} · {it.get('chart_mode', '관리도')}", fontsize=14, weight='bold',
+    title_left = .055 if print_layout else .075
+    fig.text(title_left, 0.97, f"{col} · {it.get('chart_mode', '관리도')}", fontsize=14, weight='bold',
              color=C['primary'], va='top')
-    fig.text(0.075, 0.925,
+    fig.text(title_left, 0.925,
              f"{phase_label}  ·  {limit_reference_label} 기준  ·  표시 {len(means):,} / 전체 {it.get('total_points', len(means)):,}점  ·  전체 집계: "
              f"상한 초과 {it['xbar_ucl_cnt']}건 / 하한 미달 {it['xbar_lcl_cnt']}건  ·  "
              f"{r_lab} 이탈 {it['r_ucl_cnt'] + it['r_lcl_cnt']}건",
@@ -223,7 +236,7 @@ def build_control_chart(
             va='top',
             fontsize=7.5,
             color=C['muted'],
-            bbox=dict(boxstyle='round,pad=0.18', facecolor='white', edgecolor='none', alpha=0.8),
+            bbox=dict(boxstyle='round,pad=0.18', facecolor=C['ax_bg'], edgecolor='none', alpha=1),
         )
         ax.text(
             0.99,
@@ -234,7 +247,7 @@ def build_control_chart(
             va='top',
             fontsize=7.5,
             color=C['muted'],
-            bbox=dict(boxstyle='round,pad=0.18', facecolor='white', edgecolor='none', alpha=0.8),
+            bbox=dict(boxstyle='round,pad=0.18', facecolor=C['ax_bg'], edgecolor='none', alpha=1),
         )
 
     # ?? ?쒓렇留?議???
@@ -430,16 +443,31 @@ def build_control_chart(
         ax_.yaxis.set_minor_locator(AutoMinorLocator(2))
         ax_.tick_params(axis='y', which='minor', direction='in', length=3, colors=text_color)
 
-    fig.subplots_adjust(left=0.075, right=0.87, top=0.77, bottom=0.12, hspace=0.48)
+    if print_layout:
+        fig.subplots_adjust(left=.055, right=.915, top=.785, bottom=.13, hspace=.43)
+    else:
+        fig.subplots_adjust(left=0.075, right=0.87, top=0.77, bottom=0.12, hspace=0.48)
     return fig
 
 
-def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=None):
+def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=None, show_zones=None):
     """확대·축소 및 측정점 확인용 관리도. 정적 차트와 같은 분석 결과를 사용한다."""
+    from html import escape
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     colors = PALETTES.get(palette, PALETTES[DEFAULT_PALETTE])
     means, ranges = np.asarray(it['means']), np.asarray(it['ranges'])
+    is_pearson = it.get('distribution_mode') == 'nonnormal'
+    dispersion = it['dispersion_kind']
+    location = 'I' if it['is_xmr'] else 'X̄'
+    chart_name = '피어슨 관리도' if is_pearson else f'{location}–{dispersion} 관리도'
+    location_label = '개별 측정값' if it['is_xmr'] else '부분군 평균'
+    location_title = f'피어슨 위치 관리도 · {location_label}' if is_pearson else f'{location} 관리도 · {location_label}'
+    dispersion_title = {
+        'MR': 'MR · 이동범위 참고' if is_pearson else 'MR 관리도 · 이동범위',
+        'R': 'R 관리도 · 부분군 범위',
+        'S': 'S 관리도 · 부분군 표준편차',
+    }[dispersion]
     offset = int(it.get('window_offset', 0))
     positions = np.arange(1, len(means) + 1) + offset
     labels = _labels_or_fallback(it.get('x_labels'), len(means), it['n'], it['is_xmr'])
@@ -449,7 +477,7 @@ def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=Non
              for i in range(len(means))]
     ink = '#E2E8F0' if palette == 'dark' else '#1E293B'
     figure = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.16,
-                           row_heights=[.58, .42], subplot_titles=['측정값 / 부분군 평균', '변동 · ' + it['dispersion_kind']])
+                           row_heights=[.58, .42], subplot_titles=[location_title, dispersion_title])
     # Keep the first two fields stable for callers; include limits in every point tooltip.
     def point_data(point_labels, values, lower, center, upper, point_rules=None):
         return [[str(label), point_rules[i] if point_rules is not None else '없음',
@@ -519,10 +547,22 @@ def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=Non
                     annotation_borderpad=4,annotation_yshift=shifts.get(key,0))
         if it.get('control_phase')=='phase2':
             figure.add_vline(x=offset+it['baseline_display_count']+.5,row=row,col=1,line_dash='dot',line_color=colors['muted'])
-    figure.update_layout(height=760,hovermode='closest',dragmode='zoom',
+    if show_zones is not None and it.get('distribution_mode') != 'nonnormal':
+        cl, upper, lower = it['xbarbar'], it['ucl'], it['lcl']
+        sigma = (upper-lower)/6 if np.isfinite(upper) and np.isfinite(lower) else np.nan
+        if np.isfinite(sigma) and sigma > 0:
+            for zone, spans in [('C',[(-1,1)]),('B',[(-2,-1),(1,2)]),('A',[(-3,-2),(2,3)]),('Z3',[(-3.5,-3),(3,3.5)])]:
+                if show_zones.get(zone, True):
+                    for low, high in spans:
+                        figure.add_hrect(y0=cl+low*sigma,y1=cl+high*sigma,
+                            fillcolor=colors['zone3' if zone=='Z3' else 'zone'+zone],opacity=.14,line_width=0,
+                            layer='below',row=1,col=1)
+    figure.update_layout(height=760,hovermode='closest',dragmode='pan',
         paper_bgcolor=colors['ax_bg'],plot_bgcolor=colors['ax_bg'],
         font=dict(color=ink, size=15), hoverlabel=dict(font_size=16, bgcolor=colors['ax_bg'], font_color=ink),
-        margin=dict(l=75,r=155,t=100,b=60,autoexpand=False),
+        title=dict(text=f'<b>{chart_name}</b> · {escape(str(it["column"]))}', x=0, xref='paper', xanchor='left',
+                   y=.98, yref='container', yanchor='top', font=dict(size=22, color=ink)),
+        margin=dict(l=75,r=155,t=123,b=60,autoexpand=False),
         legend=dict(orientation='h',y=1.08,yanchor='bottom',x=0,font=dict(size=14)),
         uirevision=f"{it['column']}:{offset}:{len(means)}:{it['ucl']}:{it['r_ucl']}")
     figure.update_xaxes(range=[offset+.5,offset+len(means)+.5],showgrid=False,
@@ -535,20 +575,94 @@ def build_interactive_control_chart(it, palette=DEFAULT_PALETTE, ksq_toggles=Non
     return figure
 
 
+EXTENDED_PANEL_STYLES = {
+    "확장 X̄": ("확장 X̄ · 예상 평균 이동 반영", "success"),
+    "S": ("S · 부분군 내 산포", "accent"),
+    "일반 X̄": ("일반 X̄ · 비교용", "primary"),
+}
+
+
+def extended_chart_window(table):
+    x = table["부분군"]
+    left, right = float(x.iloc[0]) - .5, float(x.iloc[-1]) + .5
+    monitor = x[table["구간"] == "감시"]
+    start = None if monitor.empty else float(monitor.iloc[0]) - .5
+    return left, right, start
+
+
+def extended_limits_display(limits):
+    return "    ".join(f"{label} {value:.7g}" for label, value in zip(("UCL", "CL", "LCL"), limits[::-1]))
+
+
+def build_extended_figure(result, palette=DEFAULT_PALETTE, *, table=None, compare=False):
+    from spc_extended import display_panels, mean_axis_limits
+
+    colors = _apply_palette(palette)
+    table = result["table"] if table is None else table
+    ink = "#E2E8F0" if palette == "dark" else "#192C43"
+    panels = display_panels(compare)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(12, 7.9 if compare else 5.7), sharex=True)
+    fig.subplots_adjust(left=.105, right=.96, top=.84, bottom=.10, hspace=.53)
+    x = table["부분군"]
+    left, right, start = extended_chart_window(table)
+    legend = [
+        Line2D([], [], color=colors["muted"], lw=1.2, ls=(0, (1, 2)), label="중심선"),
+        Line2D([], [], color=colors["accent"], lw=1.4, ls=(0, (5, 3)), label="관리한계"),
+        Line2D([], [], color=colors["danger"], marker="D", ls="None", markersize=5, label="관리한계 이탈"),
+        Rectangle((0, 0), 1, 1, fc=colors["primary"], ec="none", alpha=.08, label="감시구간"),
+        Rectangle((0, 0), 1, 1, fc=colors["success"], ec="none", alpha=.13, label="예상 평균 범위"),
+    ]
+    fig.legend(handles=legend, loc="upper left", bbox_to_anchor=(.09, .988), ncol=5,
+               frameon=False, fontsize=9)
+    for ax, (name, value) in zip(axes, panels):
+        title, color = EXTENDED_PANEL_STYLES[name]
+        accent = colors[color]
+        bad = table[name + " 판정"] != "이내"
+        ax.set_axisbelow(True)
+        ax.grid(axis="x", visible=False)
+        ax.spines[["top", "right"]].set_visible(False)
+        if start is not None:
+            ax.axvspan(start, right, color=colors["primary"], alpha=.065, lw=0, zorder=0)
+            if start > left:
+                ax.axvline(start, color=colors["primary"], alpha=.65, lw=1.1, zorder=2)
+        if name == "확장 X̄":
+            ax.axhspan(result["lower"], result["upper"], color=accent, alpha=.12, lw=0, zorder=0)
+        ax.plot(x, table[value], color=accent, marker="o" if len(x) <= 200 else None, ms=3.2, lw=1.55)
+        ax.scatter(x[bad], table.loc[bad, value], c=colors["danger"], marker="D", s=30,
+                   edgecolors=colors["ax_bg"], linewidths=.6, zorder=5)
+        limits = result["limits"][name]
+        for i, limit in enumerate(limits):
+            ax.axhline(limit, linestyle=(0, (1, 2) if i == 1 else (5, 3)),
+                       color=colors["muted"] if i == 1 else colors["accent"], lw=1.1, zorder=2)
+        ax.set_title(title.replace("X̄", r"$\overline{X}$"),
+                     loc="left", pad=11, fontsize=12, weight="bold", color=ink)
+        ax.set_title(extended_limits_display(limits), loc="right", pad=12, fontsize=9, color=colors["muted"])
+        if value == "평균":
+            ax.set_ylim(mean_axis_limits(result, table))
+        ax.set_ylabel(value)
+        ax.yaxis.set_major_locator(MaxNLocator(5))
+        ax.ticklabel_format(axis="y", useOffset=False, scilimits=(-4, 5))
+    axes[-1].set_xlim(left, right)
+    axes[-1].xaxis.set_major_locator(MaxNLocator(nbins=12, integer=True))
+    axes[-1].set_xlabel("원본 부분군")
+    return fig
+
+
 def _distribution_canvas(it, palette, figsize, title):
     """Shared editorial layout for distribution diagnostics and exports."""
     C = _apply_palette(palette)
     ink = '#E2E8F0' if palette == 'dark' else '#24364B'
     fig, ax = plt.subplots(figsize=figsize, facecolor=C['ax_bg'])
     ax.set_facecolor(C['ax_bg'])
-    fig.subplots_adjust(left=.11, right=.97, top=.70, bottom=.25)
-    fig.text(.07, .94, title, fontsize=16, weight='bold', color=ink)
-    fig.text(.07, .885, f"측정 항목  {it['column']}", fontsize=10, color=C['muted'])
+    fig.subplots_adjust(left=.12, right=.97, top=.69, bottom=.28)
+    if title:
+        fig.text(.07, .94, title, fontsize=16, weight='bold', color=ink)
+        fig.text(.07, .885, f"측정 항목  {it['column']}", fontsize=11, color=C['muted'])
     ax.spines[['top', 'right']].set_visible(False)
     ax.grid(False)
     ax.yaxis.grid(True, color=C['grid'], alpha=.5, linewidth=.7)
     ax.set_axisbelow(True)
-    ax.tick_params(colors=ink, labelsize=9, length=3)
+    ax.tick_params(colors=ink, labelsize=10.5, length=4)
     ax.xaxis.label.set_color(ink)
     ax.yaxis.label.set_color(ink)
     ax.ticklabel_format(axis='both', style='plain', useOffset=False)
@@ -557,19 +671,41 @@ def _distribution_canvas(it, palette, figsize, title):
 
 def _distribution_metrics(fig, entries, C, ink):
     for x, (label, value) in zip(np.linspace(.07, .76, len(entries)), entries):
-        fig.text(x, .815, label, fontsize=9, color=C['muted'])
-        fig.text(x, .762, value, fontsize=13, weight='bold', color=ink)
+        fig.text(x, .815, label, fontsize=10.5, color=C['muted'])
+        fig.text(x, .762, value, fontsize=14, weight='bold', color=ink)
 
 
 def build_histogram(
     it: Dict[str, Any],
     palette: str = DEFAULT_PALETTE,
     bins: int = 30,
-    figsize: Tuple[float, float] = (9, 5.6),
+    figsize: Tuple[float, float] = (8, 5.8),
     range_mode: str = 'spec',
+    *,
+    print_layout: bool = False,
+    report_layout: bool = False,
 ) -> Figure:
     """Histogram with fitted density, specification context and summary metrics."""
-    fig, ax, C, ink = _distribution_canvas(it, palette, figsize, '분포 분석  /  Histogram')
+    if print_layout and palette == 'dark':
+        palette = DEFAULT_PALETTE
+    compact_layout = print_layout or report_layout
+    label_size = 8.5 if print_layout else 11
+    fig, ax, C, ink = _distribution_canvas(
+        it, palette, figsize, None if compact_layout else '분포 분석  /  Histogram')
+    if compact_layout:
+        if palette != 'dark':
+            ink = '#111827'
+        if print_layout:
+            fig.subplots_adjust(left=.13, right=.71, top=.77, bottom=.26)
+        else:
+            fig.subplots_adjust(left=.115, right=.75, top=.83, bottom=.15)
+        ax.tick_params(colors=ink, labelsize=label_size, length=3, pad=2)
+        ax.ticklabel_format(axis='both', style='sci', scilimits=(-3, 4), useMathText=False)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
+        ax.xaxis.label.set_color(ink)
+        ax.yaxis.label.set_color(ink)
+        ax.spines[['left', 'bottom']].set_color('#64748b')
     a = np.asarray(it['series'], dtype=float)
     a = a[np.isfinite(a)]
     if not a.size:
@@ -577,10 +713,25 @@ def build_histogram(
         return fig
     mu = float(np.mean(a))
     sd = float(np.std(a, ddof=1)) if a.size > 1 else 0.
-    _distribution_metrics(fig, [('표본 수', f'{a.size:,}'), ('평균', f'{mu:.4f}'),
-                               ('표준편차 (전체)', f'{sd:.4f}'), ('중앙값', f'{np.median(a):.4f}')], C, ink)
+
+    def measurement_text(value):
+        if compact_layout and (abs(value) >= 1e5 or 0 < abs(value) < 5e-5):
+            return f'{value:.4g}'
+        return f'{value:.4f}'
+
+    entries = [('표본 수', f'{a.size:,}'), ('평균', measurement_text(mu)),
+               ('표준편차 (전체)', measurement_text(sd)), ('중앙값', measurement_text(np.median(a)))]
+    if print_layout:
+        stats_line = '    '.join(f'{key} {value}' for key, value in entries)
+        fig.text(.035, .985, stats_line, fontsize=8.5, color=ink, va='top')
+    elif report_layout:
+        for x, (label, value) in zip(np.linspace(.035, .78, len(entries)), entries):
+            fig.text(x, .98, label, fontsize=label_size, color=ink, va='top')
+            fig.text(x, .921, value, fontsize=label_size, weight='bold', color=ink, va='top')
+    else:
+        _distribution_metrics(fig, entries, C, ink)
     lo, hi = min(a.min(), mu - 3.5*sd), max(a.max(), mu + 3.5*sd)
-    refs = [('평균', mu, C['accent'], '--'),
+    refs = [('평균', mu, C['mean'], '--'),
             ('목표', it.get('target', np.nan), C['warning'], '-.'),
             ('LSL', it.get('lsl', np.nan), C['lsl'], ':'),
             ('USL', it.get('usl', np.nan), C['usl'], ':')]
@@ -590,35 +741,72 @@ def build_histogram(
         lo, hi = min([lo]+[r[1] for r in refs]), max([hi]+[r[1] for r in refs])
     pad = (hi-lo)*.08 if hi > lo else max(abs(mu)*.001, .001)
     lo, hi = lo-pad, hi+pad
-    ax.hist(a, bins=max(5, bins), density=True, color=C['primary'], alpha=.65,
+    ax.hist(a, bins=max(5, bins), density=True, color=C['primary'], alpha=1 if compact_layout else .9,
             edgecolor=C['ax_bg'], linewidth=.7, label='관측 분포')
     if it.get('distribution_mode') == 'nonnormal' and (it.get('distribution_model') or {}).get('eligible'):
         from spc_nonnormal import frozen_model
         model = it['distribution_model']
         xs = np.linspace(lo, hi, 600)
-        ax.plot(xs, frozen_model(model).pdf(xs), color=C['accent'], lw=2, label='적합 ' + model['name'] + ' 분포')
+        ax.plot(xs, frozen_model(model).pdf(xs), color=C['accent'], lw=2.5, label='적합 ' + model['name'] + ' 분포')
     elif sd > 0 and it.get('distribution_mode') != 'nonnormal':
         xs = np.linspace(lo, hi, 600)
-        ax.plot(xs, stats.norm.pdf(xs, mu, sd), color=C['accent'], lw=2, label='적합 정규분포')
+        ax.plot(xs, stats.norm.pdf(xs, mu, sd), color=C['accent'], lw=2.5, label='적합 정규분포')
     for name, value, color, style in refs:
         if lo <= value <= hi:
-            ax.axvline(value, color=color, ls=style, lw=1.3, label=f'{name} {value:.4f}')
+            ax.axvline(value, color=color, ls=style, lw=1.8, label=f'{name} {measurement_text(value)}')
     ax.set_xlim(lo, hi)
-    ax.set_xlabel('측정값', fontsize=10)
-    ax.set_ylabel('확률밀도', fontsize=10)
-    ax.legend(loc='upper center', bbox_to_anchor=(.5, -.22), ncol=3,
-              frameon=False, fontsize=8, labelcolor=ink)
+    ax.set_xlabel('측정값', fontsize=label_size, labelpad=2 if compact_layout else None)
+    ax.set_ylabel('확률밀도', fontsize=label_size, labelpad=2 if compact_layout else None)
+    if compact_layout:
+        ax.legend(loc='center left', bbox_to_anchor=(1.035, .5), frameon=False,
+                  fontsize=label_size, labelcolor=ink, handlelength=1.7,
+                  handletextpad=.5, borderaxespad=0, labelspacing=.32)
+        return fig
+    ax.legend(loc='upper center', bbox_to_anchor=(.5, -.23), ncol=3,
+              frameon=False, fontsize=9.5, labelcolor=ink)
     specs = '   ·   '.join(f'{name} {v:.4f}' for name,v,_,_ in refs if name != '평균')
-    fig.text(.07, .045, specs or '규격 / 목표 미설정', fontsize=9, color=C['muted'])
+    fig.text(.07, .045, specs or '규격 / 목표 미설정', fontsize=10, color=C['muted'])
     fig.text(.07, .012, '분포 확대: 화면 밖 규격은 하단 수치로 확인' if range_mode != 'spec'
-             else '규격 전체: 관측 분포와 규격 위치를 함께 표시', fontsize=8, color=C['muted'])
+             else '규격 전체: 관측 분포와 규격 위치를 함께 표시', fontsize=10, color=C['muted'])
     return fig
+
+
+def annotate_qq_diagnostics(ax, values, colors, *, diagnostic=None, model=None, above=True):
+    """Show shape statistics and the AD statistic for the Q-Q reference distribution."""
+    from spc_core import _normality_sample
+    from spc_normality import normality_diagnostics, shape_magnitude
+
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    diagnostic = diagnostic or normality_diagnostics(values)
+    label = 'AD'
+    if model is not None:
+        ad = model.get('ad')
+    elif diagnostic.get('test') == 'Anderson-Darling':
+        ad = diagnostic.get('statistic')
+    else:
+        label = 'AD (참고)'
+        ad = None
+        if len(values) >= 3 and np.ptp(values) > 0:
+            from spc_nonnormal import _ad
+            sample = _normality_sample(values)
+            scale = float(np.std(sample, ddof=1))
+            if np.isfinite(scale) and scale > 0:
+                ad = _ad(sample, stats.norm(loc=np.mean(sample), scale=scale))
+    entries = [(label, ad), ('왜도', shape_magnitude(diagnostic.get('skewness'))),
+               ('첨도', shape_magnitude(diagnostic.get('kurtosis')))]
+    text = '    ·    '.join(f'{name} {value:.3f}' if value is not None and np.isfinite(value) else f'{name} —'
+                         for name, value in entries)
+    ax.text(.01, 1.025 if above else .97, text, transform=ax.transAxes,
+            ha='left', va='bottom' if above else 'top', fontsize=10.5, fontweight='bold',
+            color=colors['muted'], zorder=5,
+            bbox=dict(facecolor=colors['ax_bg'], edgecolor=colors['grid'], boxstyle='round,pad=.32'))
 
 
 def build_qq_plot(
     it: Dict[str, Any],
     palette: str = DEFAULT_PALETTE,
-    figsize: Tuple[float, float] = (9, 5.6),
+    figsize: Tuple[float, float] = (8, 5.8),
 ) -> Figure:
     """Normal Q-Q diagnostic; no misleading observation-centred confidence band."""
     if it.get('distribution_mode') == 'nonnormal':
@@ -626,15 +814,18 @@ def build_qq_plot(
         fig, ax, C, ink = _distribution_canvas(it, palette, figsize, '적합분포 진단 / Q-Q Plot')
         model = it.get('distribution_model') or {}
         if model.get('eligible'):
-            a = np.sort(np.asarray(it['series'], dtype=float))
+            values = np.asarray(it['series'], dtype=float)
+            a = np.sort(values[np.isfinite(values)])
             a = a[np.linspace(0, len(a)-1, min(len(a), 10000)).astype(int)]
             theory = frozen_model(model).ppf((np.arange(len(a))+.5)/len(a))
-            ax.scatter(theory, a, s=12, color=C['primary'], alpha=.75)
+            ax.scatter(theory, a, s=26, color=C['primary'], alpha=1, edgecolors=C['ax_bg'], linewidths=.4)
             lo, hi = min(theory.min(), a.min()), max(theory.max(), a.max())
-            ax.plot([lo, hi], [lo, hi], color=C['muted'])
-            _distribution_metrics(fig, [('적용 분포', model['name']), ('AD', _fmt(model['ad'])),
+            ax.plot([lo, hi], [lo, hi], color=C['muted'], lw=1.8, ls='--')
+            _distribution_metrics(fig, [('적용 분포', model['name']),
                                        ('bootstrap p', _fmt(model['pvalue'])), ('검정 N', str(model['test_n']))], C, ink)
-            fig.text(.07, .055, '모수 재추정 bootstrap AD · 적합도 통과는 공정 안정성의 증거가 아닙니다.', fontsize=9, color=C['muted'])
+            annotate_qq_diagnostics(ax, values, C,
+                                    diagnostic=it.get('normality_diagnostics', {}).get('individual'), model=model)
+            fig.text(.07, .055, '모수 재추정 bootstrap AD\n적합도 통과는 공정 안정성의 증거가 아닙니다.', fontsize=10, color=C['muted'])
         else:
             ax.text(.5, .5, '검증된 분포 없음 · 분포 진단과 선택을 확인하세요.', ha='center', transform=ax.transAxes)
         ax.set_xlabel('선택 분포 이론 분위수')
@@ -647,36 +838,34 @@ def build_qq_plot(
     from spc_normality import normality_diagnostics
     diagnostic=it.get('normality_diagnostics',{}).get('transformed' if it.get('box_cox_applied') else 'individual')
     diagnostic=diagnostic or normality_diagnostics(a)
-    skew = diagnostic.get('skewness')
-    kurt = diagnostic.get('excess_kurtosis')
-    _distribution_metrics(fig, [('표본 수', f'{a.size:,}'), ('왜도', _fmt(skew)),
-                               ('초과첨도', _fmt(kurt)), ('기준 분포', '정규분포')], C, ink)
+    _distribution_metrics(fig, [('표본 수', f'{a.size:,}'), ('기준 분포', '정규분포')], C, ink)
+    annotate_qq_diagnostics(ax, a, C, diagnostic=diagnostic)
     if valid:
         from spc_core import _normality_sample
         (osm, osr), (slope, intercept, _) = stats.probplot(_normality_sample(a), dist='norm')
-        ax.plot(osm, slope*osm+intercept, color=C['muted'], lw=1.4,
+        ax.plot(osm, slope*osm+intercept, color=C['muted'], lw=1.8, ls='--',
                 label='최소제곱 기준선', zorder=2)
-        ax.scatter(osm, osr, s=20, color=C['primary'], alpha=.75,
+        ax.scatter(osm, osr, s=28, color=C['primary'], alpha=1,
                    edgecolors=C['ax_bg'], linewidths=.4, label='관측값', zorder=3)
         summary = diagnostic['message']
         verdict = ('정규성 이탈 신호 · 꼬리와 집단 혼합 여부를 확인하세요.' if '의심' in summary
                    else '유의수준 5%에서 정규성을 기각할 근거가 부족합니다.' if '만족' in summary
                    else '정규성 검정 불가 · 측정값과 검정 조건을 확인하세요.')
         fig.text(.07, .105, summary, fontsize=10, color=ink, weight='bold')
-        fig.text(.07, .055, verdict, fontsize=9, color=C['muted'])
-        fig.text(.07, .015, '점이 기준선에서 벗어나는 위치와 크기를 함께 확인하세요.', fontsize=8, color=C['muted'])
-        ax.legend(loc='upper left', frameon=False, fontsize=9, labelcolor=ink)
+        fig.text(.07, .055, verdict, fontsize=10, color=C['muted'])
+        fig.text(.07, .015, '점이 기준선에서 벗어나는 위치와 크기를 함께 확인하세요.', fontsize=10, color=C['muted'])
+        ax.legend(loc='upper left', frameon=False, fontsize=10, labelcolor=ink)
     else:
         ax.text(.5, .5, '정규성 진단 불가: 표본 3개 이상과 변동이 필요합니다',
                 ha='center', transform=ax.transAxes, fontsize=10, color=ink)
-    ax.set_xlabel('정규분포 이론 분위수', fontsize=10)
-    ax.set_ylabel('관측값 분위수', fontsize=10)
+    ax.set_xlabel('정규분포 이론 분위수', fontsize=11)
+    ax.set_ylabel('관측값 분위수', fontsize=11)
     return fig
 
 
 def stability_assessment(results, ppk_limit=1.33, ratio_limit=1.25):
     """Classify finite capability pairs; undefined ratios stay unclassified."""
-    if not (np.isfinite(ppk_limit) and ppk_limit > 0
+    if not ((ppk_limit is None or (np.isfinite(ppk_limit) and ppk_limit > 0))
             and np.isfinite(ratio_limit) and ratio_limit > 1):
         raise ValueError('Ppk 기준은 0보다 크고 비율 기준은 1보다 커야 합니다.')
     rows = []
@@ -684,9 +873,14 @@ def stability_assessment(results, ppk_limit=1.33, ratio_limit=1.25):
         ratio, ppk = it.get('within_overall_ratio'), it.get('ppk')
         if ratio is None or ppk is None or not np.isfinite(ratio) or not np.isfinite(ppk) or ratio < 0:
             continue
-        group = (0 if ppk >= ppk_limit else 2) + (1 if ratio > ratio_limit else 0)
+        from spc_policy import limits, band
+        target = limits(it, 'ppk')[1] if ppk_limit is None else ppk_limit
+        if ppk_limit is None and band(ppk, it, 'ppk') == 'na':
+            continue
+        group = (0 if ppk >= target else 2) + (1 if ratio > ratio_limit else 0)
         rows.append(dict(column=str(it['column']), ratio=float(ratio), ppk=float(ppk),
-                         cwk=it.get('cwk', np.nan), group=group))
+                         cwk=it.get('cwk', np.nan), group=group, required=target,
+                         plot_y=float(ppk)/target if ppk_limit is None else float(ppk)))
     return rows
 
 
@@ -699,17 +893,19 @@ def build_interactive_stability_scatter(results, palette=DEFAULT_PALETTE,
     C = PALETTES.get(palette, PALETTES[DEFAULT_PALETTE])
     ink = '#E2E8F0' if palette == 'dark' else '#24364B'
     rows = stability_assessment(results, ppk_limit, ratio_limit)
+    automatic = ppk_limit is None
+    boundary = 1. if automatic else ppk_limit
     xmax = max(2.5, ratio_limit * 1.5)
-    ymin, ymax = -.5, max(3., ppk_limit * 2)
+    ymin, ymax = -.5, max(3., boundary * 2)
     if not focus and rows:
         xmax = max(xmax, max(r['ratio'] for r in rows) * 1.1)
-        ymin = min(ymin, min(r['ppk'] for r in rows) - .2)
-        ymax = max(ymax, max(r['ppk'] for r in rows) * 1.12)
+        ymin = min(ymin, min(r['plot_y'] for r in rows) - .2)
+        ymax = max(ymax, max(r['plot_y'] for r in rows) * 1.12)
     regions = [
-        ('Ppk 기준 이상 · 변동 차이 작음', '#16A085', (0, ratio_limit, ppk_limit, ymax)),
-        ('Ppk 기준 이상 · 변동 차이 큼', '#C49A17', (ratio_limit, xmax, ppk_limit, ymax)),
-        ('Ppk 기준 미만 · 변동 차이 작음', '#D98236', (0, ratio_limit, ymin, ppk_limit)),
-        ('Ppk 기준 미만 · 변동 차이 큼', '#D84F65', (ratio_limit, xmax, ymin, ppk_limit)),
+        ('Ppk 기준 이상 · 변동 차이 작음', '#16A085', (0, ratio_limit, boundary, ymax)),
+        ('Ppk 기준 이상 · 변동 차이 큼', '#C49A17', (ratio_limit, xmax, boundary, ymax)),
+        ('Ppk 기준 미만 · 변동 차이 작음', '#D98236', (0, ratio_limit, ymin, boundary)),
+        ('Ppk 기준 미만 · 변동 차이 큼', '#D84F65', (ratio_limit, xmax, ymin, boundary)),
     ]
     fig = go.Figure()
     for group, (label, color, (x0, x1, y0, y1)) in enumerate(regions):
@@ -719,22 +915,22 @@ def build_interactive_stability_scatter(results, palette=DEFAULT_PALETTE,
                            showarrow=False, font=dict(size=12, color=ink))
         members = [r for r in rows if r['group'] == group]
         fig.add_trace(go.Scatter(
-            x=[r['ratio'] for r in members], y=[r['ppk'] for r in members],
+            x=[r['ratio'] for r in members], y=[r['plot_y'] for r in members],
             mode='markers+text' if show_labels else 'markers',
             text=[html.escape(r['column']) for r in members], textposition='top right',
             textfont=dict(size=11, color=ink), name=label,
             marker=dict(size=11, color=color, line=dict(color=C['ax_bg'], width=1.5)),
-            customdata=[[html.escape(r['column']), r['cwk']] for r in members],
-            hovertemplate='<b>%{customdata[0]}</b><br>Ppk %{y:.4f}<br>Cwk %{customdata[1]:.4f}'
+            customdata=[[html.escape(r['column']), r['cwk'], r['ppk'], r['required']] for r in members],
+            hovertemplate='<b>%{customdata[0]}</b><br>Ppk %{customdata[2]:.4f}<br>조정 목표값 %{customdata[3]:.3f}<br>Cwk %{customdata[1]:.4f}'
                           '<br>|Cwk/Ppk| %{x:.4f}<extra>%{fullData.name}</extra>'))
     fig.add_vline(x=ratio_limit, line_color=C['muted'], line_dash='dash', line_width=1)
-    fig.add_hline(y=ppk_limit, line_color=C['muted'], line_dash='dash', line_width=1)
-    if show_contour:
+    fig.add_hline(y=boundary, line_color=C['muted'], line_dash='dash', line_width=1)
+    if show_contour and not automatic:
         xs = np.linspace(max(.02, 1/ymax), xmax, 300)
         fig.add_trace(go.Scatter(x=xs, y=1/xs, mode='lines', name='Cwk = 1 (Ppk > 0)',
                                 line=dict(color=C['danger'], width=1.8),
                                 hovertemplate='Cwk = 1<br>비율 %{x:.3f}<br>Ppk %{y:.3f}<extra></extra>'))
-    outside = sum(not (0 <= r['ratio'] <= xmax and ymin <= r['ppk'] <= ymax) for r in rows)
+    outside = sum(not (0 <= r['ratio'] <= xmax and ymin <= r['plot_y'] <= ymax) for r in rows)
     fig.update_layout(height=600, paper_bgcolor=C['ax_bg'], plot_bgcolor=C['ax_bg'],
                       font=dict(family=_chosen_font, color=ink), margin=dict(l=65, r=30, t=25, b=75),
                       showlegend=False, hovermode='closest',
@@ -744,7 +940,7 @@ def build_interactive_stability_scatter(results, palette=DEFAULT_PALETTE,
                           showarrow=False, font=dict(size=11, color=C['muted']))])
     fig.update_xaxes(title=f'군내/전체 지수 비율 |Cwk/Ppk| · 구분 기준 {ratio_limit:g}',
                      range=[0, xmax], gridcolor=C['grid'], zeroline=False)
-    fig.update_yaxes(title=f'전체 성능 Ppk (참고) · 충족 기준 {ppk_limit:g}',
+    fig.update_yaxes(title='Ppk / 항목별 요구값 · 1 이상 기준 충족·조건부 (참고)' if automatic else f'전체 성능 Ppk (참고) · 충족 기준 {ppk_limit:g}',
                      range=[ymin, ymax], gridcolor=C['grid'], zeroline=False)
     return fig
 
@@ -762,6 +958,8 @@ def build_stability_scatter(
     fig, ax = plt.subplots(figsize=figsize, facecolor=C['bg'])
     ax.set_facecolor(C['ax_bg'])
 
+    from spc_policy import band, limits
+    automatic = any(it.get('capability_criteria', {}).get('mode') == 'aiag_vda' for it in results)
     for it in results:
         ratio = it.get('within_overall_ratio', np.nan)
         ppk = it.get('ppk', np.nan)
@@ -772,20 +970,18 @@ def build_stability_scatter(
             continue
 
         # ?됱긽: ppk<1.0=danger, 1.0~1.33=warning, >=1.33=success
-        if ppk < 1.0:
-            color = C['danger']
-        elif ppk < 1.33:
-            color = C['warning']
-        else:
-            color = C['success']
+        state = band(ppk, it, 'ppk')
+        color = {'bad':C['danger'], 'warn':C['warning'], 'good':C['success']}.get(state, C['muted'])
 
         ax.scatter(ratio, ppk, s=80, color=color, zorder=5, edgecolors='white', linewidths=0.8)
         ax.annotate(str(col), (ratio, ppk), textcoords='offset points', xytext=(5, 3),
                     fontsize=7.5, color=C['muted'])
 
     ax.axvline(1.0, linestyle='--', color=C['muted'], linewidth=1.1, alpha=0.7, label='군내/전체 비율=1')
-    ax.axhline(1.33, linestyle='--', color=C['success'], linewidth=1.1, alpha=0.7, label='Ppk=1.33')
-    ax.axhline(1.00, linestyle='--', color=C['warning'], linewidth=1.1, alpha=0.7, label='Ppk=1.00')
+    if not automatic:
+        warning, required = limits(results[0] if results else None, 'ppk')
+        ax.axhline(required, linestyle='--', color=C['success'], linewidth=1.1, alpha=0.7, label=f'Ppk={required:g}')
+        ax.axhline(warning, linestyle='--', color=C['warning'], linewidth=1.1, alpha=0.7, label=f'Ppk={warning:g}')
 
     ax.set_xlabel('군내/전체 지수 비율 (|Cwk/Ppk|)', fontsize=10)
     ax.set_ylabel('Ppk', fontsize=10)
@@ -794,9 +990,10 @@ def build_stability_scatter(
 
     from matplotlib.patches import Patch
     legend_els = [
-        Patch(facecolor=C['success'], label='Ppk >= 1.33 (참고 기준 이상)'),
-        Patch(facecolor=C['warning'], label='1.00 <= Ppk < 1.33 (참고 구간)'),
-        Patch(facecolor=C['danger'], label='Ppk < 1.00 (참고 기준 미만)'),
+        Patch(facecolor=C['success'], label='항목별 기준 충족·조건부 (참고)'),
+        Patch(facecolor=C['warning'], label='주의 (수동 기준)'),
+        Patch(facecolor=C['danger'], label='항목별 기준 미달'),
+        Patch(facecolor=C['muted'], label='판정 보류'),
     ]
     ax.legend(handles=legend_els, loc='upper left', fontsize=8, framealpha=0.88)
 
@@ -874,7 +1071,7 @@ def build_overview_2x2(
 
     # ???????????? [0,0] ?붿빟 ?뺣낫 ?⑤꼸 ????????????
     ax1.axis('off')
-    ax1.set_title(f'{col} - 요약 정보', fontsize=11, fontweight='bold', color='#1a1a1a', pad=12)
+    ax1.set_title(f'{col} - 요약 정보', fontsize=11, fontweight='bold', pad=12)
 
     lines = [
         ("USL / LSL", f"{_fmt(usl, 3) if np.isfinite(usl) else '없음'} / {_fmt(lsl, 3) if np.isfinite(lsl) else '없음'}"),
@@ -885,7 +1082,7 @@ def build_overview_2x2(
         ("표준편차 (MR / 전체)" if it.get('within_estimator')=='moving_range' else "표준편차 (군내 / 전체)", f"{_fmt(std_within)} / {_fmt(std_all)}"),
         ("Cp / Cpk", f"{_fmt(cp)} / {_fmt(cpk)}"),
         ("Cp/Cpk 적용 상태", it.get('capability_status', '재분석 필요')),
-        ("Cw / Cwk (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cw / Cwk (진단용)", f"{_fmt(it.get('cw', np.nan))} / {_fmt(it.get('cwk', np.nan))}"),
+        ("Cw / Cwk (MR 참고)" if it.get('within_estimator')=='moving_range' and not it.get('box_cox_applied') else "Cw / Cwk (군내산포 고려)", f"{_fmt(it.get('cw', np.nan))} / {_fmt(it.get('cwk', np.nan))}"),
         ("Pp / Ppk", f"{_fmt(pp)} / {_fmt(ppk)}"),
         ("Cpm / Cpmk", f"{_fmt(cpm)} / {_fmt(cpmk)}"),
         ("진단 비율 (Cwk/Ppk)", _fmt(stab_ratio)),
@@ -903,14 +1100,14 @@ def build_overview_2x2(
 
     # 諛곌꼍 諛뺤뒪
     ax1.add_patch(Rectangle((0.01, 0.01), 0.98, 0.98, linewidth=1,
-                             edgecolor=C['grid'], facecolor='white', alpha=0.9,
+                             edgecolor=C['grid'], facecolor=C['ax_bg'], alpha=1,
                              transform=ax1.transAxes, zorder=1))
     y = 0.94
     step = 0.88 / max(len(lines) - 1, 1)
     for lab, val in lines:
         ax1.text(0.05, y, f"{lab} :", color=C['muted'], fontsize=8.5, va='center',
                  ha='left', transform=ax1.transAxes, zorder=2)
-        ax1.text(0.50, y, val, color='#111111', fontsize=8.5, va='center',
+        ax1.text(0.50, y, val, color='#E2E8F0' if palette == 'dark' else '#1E293B', fontsize=8.5, va='center',
                  ha='left', transform=ax1.transAxes, zorder=2)
         y -= step
 
@@ -1051,50 +1248,63 @@ def build_overview_2x2(
 
 # ??????????????????????????? ?ㅻ????곴? 遺꾩꽍 ?쒓컖?????????????????????????????
 
+def correlation_matrix(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Use the same complete numeric rows for both heatmap and coefficient table."""
+    return df[cols].apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna().corr(method='pearson')
+
+
 def build_correlation_heatmap(df: pd.DataFrame, cols: list[str], palette: str = DEFAULT_PALETTE) -> Figure:
     """?좏깮??蹂?섎뱾 媛꾩쓽 ?곴?愿怨??덊듃留듭쓣 ?앹꽦?쒕떎."""
     C = PALETTES.get(palette, PALETTES[DEFAULT_PALETTE])
     _apply_palette(palette)
     
     # ?섏튂???곗씠?곕쭔 異붿텧 諛??곴?怨꾩닔 怨꾩궛
-    df_sub = df[cols].apply(pd.to_numeric, errors='coerce').dropna()
+    df_sub = df[cols].apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
     if df_sub.empty:
         fig, ax = plt.subplots(figsize=(5, 4))
         ax.text(0.5, 0.5, "유효한 수치 데이터가 부족합니다.", ha='center', va='center')
         return fig
         
-    corr = df_sub.corr(method='pearson')
+    corr = correlation_matrix(df, cols)
     
     # ?덊듃留??앹꽦
-    fig, ax = plt.subplots(figsize=(max(6, len(cols)*0.8), max(5, len(cols)*0.7)))
-    fig.patch.set_facecolor(C['bg'])
+    fig, ax = plt.subplots(figsize=(max(7.5, len(cols)*.82), max(6.5, len(cols)*.78)))
+    fig.patch.set_facecolor(C['ax_bg'])
     ax.set_facecolor(C['ax_bg'])
     
     # Seaborn ?덊듃留?(?쒓? ?고듃 ?곸슜??
-    if sns is not None:
-        sns.heatmap(
-            corr, annot=True, fmt=".2f", cmap="RdBu_r", center=0,
-            square=True, linewidths=.5, cbar_kws={"shrink": .8},
-            ax=ax, annot_kws={"size": 9}
-        )
-    else:
-        corr_vals = corr.to_numpy(dtype=float)
-        im = ax.imshow(corr_vals, cmap="RdBu_r", vmin=-1.0, vmax=1.0, aspect="equal")
-        ax.set_xticks(np.arange(len(corr.columns)))
-        ax.set_yticks(np.arange(len(corr.index)))
-        ax.set_xticklabels(corr.columns, rotation=45, ha='right', fontsize=9)
-        ax.set_yticklabels(corr.index, fontsize=9)
-
-        for i in range(corr_vals.shape[0]):
-            for j in range(corr_vals.shape[1]):
-                v = corr_vals[i, j]
-                text_color = 'white' if abs(v) >= 0.5 else 'black'
-                ax.text(j, i, f"{v:.2f}", ha='center', va='center', fontsize=8, color=text_color)
-
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-        cbar.ax.set_ylabel('Pearson r', rotation=270, labelpad=12)
+    corr_vals = corr.to_numpy(dtype=float)
+    cmap = plt.get_cmap('RdBu_r').with_extremes(bad=C['grid'])
+    im = ax.imshow(corr_vals, cmap=cmap, vmin=-1., vmax=1., aspect='equal')
+    size = len(cols)
+    ax.set_xticks(np.arange(size))
+    ax.set_yticks(np.arange(size))
+    long_labels = max(len(str(col)) for col in cols) > 6
+    ax.set_xticklabels([str(col) for col in cols], rotation=45 if long_labels else 0,
+                       ha='right' if long_labels else 'center', fontsize=12)
+    ax.set_yticklabels([str(col) for col in cols], rotation=0, fontsize=12)
+    ax.grid(False, which='both')
+    ax.set_xticks(np.arange(size + 1) - .5, minor=True)
+    ax.set_yticks(np.arange(size + 1) - .5, minor=True)
+    ax.grid(True, which='minor', color=C['ax_bg'], linewidth=1)
+    ax.tick_params(which='both', length=0, pad=8)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    for i in range(size):
+        for j in range(size):
+            value = corr_vals[i, j]
+            rgb = im.cmap(im.norm(value))[:3]
+            linear = [c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4 for c in rgb]
+            luminance = sum(c * w for c, w in zip(linear, (.2126, .7152, .0722)))
+            text_color = 'white' if luminance < .179 else 'black'
+            ax.text(j, i, f'{value:.2f}' if np.isfinite(value) else '—', ha='center', va='center',
+                    fontsize=12 if size <= 10 else 10, color=text_color,
+                    fontweight='bold' if np.isfinite(value) and abs(value) >= .7 else 'normal')
+    cbar = fig.colorbar(im, ax=ax, shrink=.85, pad=.03, ticks=[-1, -.5, 0, .5, 1])
+    cbar.ax.set_ylabel('Pearson r', rotation=270, labelpad=16, fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
     
-    ax.set_title("변수 간 상관관계 히트맵 (Pearson)", fontsize=12, fontweight='bold', pad=20)
+    ax.set_title(f"상관관계 (Pearson) · 공통 유효 {len(df_sub):,}행", fontsize=15, fontweight='bold', pad=20)
     plt.tight_layout()
     return fig
 

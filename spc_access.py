@@ -18,9 +18,15 @@ _SIGNING_KEY = secrets.token_bytes(32)
 _HASH_ROUNDS = 600_000
 # Same initial administrator password as the MSA training app.
 DEFAULT_ADMIN_PASSWORD = '0017080'
+_STUDIO_SETTINGS = {
+    'SPC_EDUCATION_MODE', 'SPC_ACCESS_CONFIG_PATH', 'SPC_ADMIN_PASSWORD',
+    'SPC_ALLOWED_DATE', 'SPC_ALLOWED_START_DATE', 'SPC_ALLOWED_END_DATE',
+}
 
 
 def setting(name):
+    if name in _STUDIO_SETTINGS and os.environ.get('SPC_STUDIO_MANAGED_DAY') == '1':
+        return os.environ.get(f'SPC_STUDIO_{name[4:]}', '').strip()
     value = os.environ.get(name, '').strip()
     if not value:
         import streamlit as st
