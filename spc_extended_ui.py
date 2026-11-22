@@ -156,8 +156,8 @@ def render_extended(item, items, palette):
         compare = st.checkbox("일반 X̄ 비교 표시", key=prefix + "_comparison")
         reference, monitoring, _ = extended_chart_phases(result["table"])
         st.markdown(f"**{reference}**　|　**{monitoring}**")
-        st.caption("파란 음영은 초기 기준구간이며 세로 점선 뒤부터 감시구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다."
-                   if not monitor.empty else "파란 음영은 초기 기준구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다.")
+        st.caption("음영은 초기 기준구간이며 세로 점선 뒤부터 감시구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다."
+                   if not monitor.empty else "음영은 초기 기준구간입니다. 녹색 띠는 예상 평균 범위, 빨간 점은 관리한계 이탈입니다.")
         table = result["table"].iloc[window]
         st.plotly_chart(_interactive(result, table, palette, compare=compare), key=prefix + "_chart", theme=None,
                         config={"scrollZoom": False, "displaylogo": False})

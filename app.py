@@ -3273,7 +3273,7 @@ with st.sidebar:
                 "색상 테마",
                 options=list(PALETTES.keys()),
                 index=list(PALETTES.keys()).index(st.session_state['palette']),
-                format_func=lambda x: {'trust': '신뢰(파랑)', 'analytics': '분석(남색)', 'dark': '다크'}.get(x, x),
+                format_func=lambda x: {'trust': '신뢰(파랑)', 'analytics': '분석(보라)', 'dark': '다크'}.get(x, x),
             )
             st.session_state['palette'] = palette
 

@@ -47,10 +47,10 @@ PALETTES = {
         'grid': '#D3DCE8', 'bg': '#F2F5FA', 'ax_bg': '#FFFFFF', 'text': '#1E293B',
     },
     'analytics': {
-        'primary': '#1D4ED8', 'accent': '#0F766E', 'success': '#047857',
+        'primary': '#6D28D9', 'accent': '#7E22CE', 'success': '#047857',
         'warning': '#92400E', 'danger': '#B42318', 'muted': '#475569',
-        'mean': '#9A4B00', 'usl': '#B42318', 'lsl': '#2453A6',
-        'grid': '#D6DFEA', 'bg': '#F4F7FB', 'ax_bg': '#FFFFFF', 'text': '#1E293B',
+        'mean': '#7E22CE', 'usl': '#B42318', 'lsl': '#4338CA',
+        'grid': '#E2DCEF', 'bg': '#F8F5FF', 'ax_bg': '#FFFFFF', 'text': '#1E293B',
     },
     'dark': {
         'primary': '#60A5FA', 'accent': '#22D3EE', 'success': '#34D399',
