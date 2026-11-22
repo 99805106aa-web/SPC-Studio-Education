@@ -509,10 +509,13 @@ def control_chart_limits(figure, colors, values, limits, *, row=None, axis_range
     span = axis_range[1] - axis_range[0]
     previous = -np.inf
     for pos, (label, value) in enumerate(sorted(endpoints, key=lambda item: item[1])):
-        color = colors['muted'] if label == 'CL' else colors['danger']
+        color, dash = {
+            'CL': (colors['muted'], 'dot'),
+            'USL': (colors['usl'], 'dot'),
+            'LSL': (colors['lsl'], 'dot'),
+        }.get(label, (colors['danger'], 'dash'))
         if label not in varying:
-            figure.add_hline(y=value, line_dash='dot' if label == 'CL' else 'dash',
-                             line_width=1.4, line_color=color, layer='below', **panel)
+            figure.add_hline(y=value, line_dash=dash, line_width=1.4, line_color=color, layer='below', **panel)
         actual = (value-axis_range[0]) * plot_height / span
         ceiling = plot_height - (len(endpoints)-pos-1)*18
         label_pixel = min(max(actual, previous+18), ceiling)

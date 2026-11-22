@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from spc_acceptance_ui import BASELINE_COUNT, LSL, MEASUREMENT_NAME, SUBGROUP_SIZE, TARGET, USL, example_measurements
 from spc_extended import EXTENDED_MODE
 
 
@@ -17,6 +18,9 @@ PEARSON_SAMPLE_SHEET = '평면도 예제(피어슨관리도)'
 SAMPLE_FILE_NAME = 'SPC_교육_통합예제.xlsx'
 SPEC_SHEET = 'SPEC'
 ATTRIBUTE_LIMIT_SAMPLE = 'attribute_limits'
+ACCEPTANCE_SAMPLE = 'acceptance'
+ACCEPTANCE_SAMPLE_SHEET = '합격판정 관리도'
+ACCEPTANCE_SPEC_SHEET = '합격판정 규격'
 SAMPLE_OPTIONS = {
     'stable': ('기본 · X̄–R', 'DATA'),
     'imr': ('기본 · I–MR', 'DATA'),
@@ -24,6 +28,7 @@ SAMPLE_OPTIONS = {
     'shift': ('평균 이동 · 관리이탈 조치 실습', '평균 이동'),
     'pearson': ('피어슨 · 평면도', PEARSON_SAMPLE_SHEET),
     EXTENDED_MODE: ('확장 슈하르트 · 외경', EXTENDED_SAMPLE_SHEET),
+    ACCEPTANCE_SAMPLE: ('합격판정 관리도 · 공구 마모', ACCEPTANCE_SAMPLE_SHEET),
     'p': ('p · 불량률', 'p 관리도'),
     'np': ('np · 불량품 수', 'np 관리도'),
     'c': ('c · 결점 수', 'c 관리도'),
@@ -68,6 +73,10 @@ def sample_workbook():
         SAMPLE_OPTIONS['stable'][1]: data,
         SAMPLE_OPTIONS['shift'][1]: pd.read_csv(io.BytesIO(shift_data)),
     }
+    sheets[ACCEPTANCE_SAMPLE_SHEET] = pd.DataFrame({MEASUREMENT_NAME: example_measurements().ravel()})
+    sheets[ACCEPTANCE_SPEC_SHEET] = pd.DataFrame([
+        {'항목': MEASUREMENT_NAME, 'LSL': LSL, 'USL': USL, 'Target': TARGET},
+    ])
     specs = [spec]
     for scenario, path in (('pearson', PEARSON_SAMPLE_PATH), (EXTENDED_MODE, EXTENDED_SAMPLE_PATH)):
         name = SAMPLE_OPTIONS[scenario][1]
@@ -83,6 +92,23 @@ def sample_workbook():
     return output.getvalue()
 
 
+def acceptance_sample_loaded(state):
+    return (state.get('selected_control_chart') == ACCEPTANCE_SAMPLE
+            and state.get('data_sheet') == ACCEPTANCE_SAMPLE_SHEET
+            and state.get('data_bytes') is not None
+            and state.get('data_bytes') == state.get('_education_acceptance_data'))
+
+
+def acceptance_sample_error(state):
+    if (state.get('data_layout_mode') != 'long' or state.get('n') != SUBGROUP_SIZE
+            or state.get('baseline_subgroups') != BASELINE_COUNT or state.get('chart_usage_mode') != 'phase2'
+            or state.get('selected_columns') != [MEASUREMENT_NAME] or state.get('measurement_date_column')
+            or state.get('spec_bytes') != state.get('data_bytes') or state.get('spec_sheet') != ACCEPTANCE_SPEC_SHEET
+            or state.get('preprocess_outliers') or state.get('box_cox_transform')):
+        return '실습 조건이 변경되었습니다. 공구 마모 예제를 다시 불러와 기본 조건으로 분석하세요.'
+    return ''
+
+
 def load_sample(scenario="stable", chart="xbar_r"):
     import streamlit as st
     from spc_access import ensure_active_day
@@ -96,7 +122,7 @@ def load_sample(scenario="stable", chart="xbar_r"):
     for key in list(state):
         if key.startswith(("data_uploader", "spec_uploader")):
             del state[key]
-    phase = "phase2" if scenario == "shift" else "phase1"
+    phase = "phase2" if scenario in ('shift', ACCEPTANCE_SAMPLE) else "phase1"
     if extended:
         phase = state.get('chart_usage_mode', 'phase1')
         if phase == EXTENDED_MODE:
@@ -110,10 +136,15 @@ def load_sample(scenario="stable", chart="xbar_r"):
                  _education_shift_data=raw if scenario == 'shift' else None, chat_history=[])
     state.pop('_education_shift_sheet', None)
     state.pop('_education_extended_data', None)
+    state.pop('_education_acceptance_data', None)
     state.pop('_education_ocap', None)
     state.pop('_guide_pearson_requested', None)
     if scenario == 'shift':
         state['_education_shift_sheet'] = data_sheet
+    elif scenario == ACCEPTANCE_SAMPLE:
+        state.update(selected_columns=[MEASUREMENT_NAME], n=SUBGROUP_SIZE, baseline_subgroups=BASELINE_COUNT,
+                     spec_sheet=ACCEPTANCE_SPEC_SHEET,
+                     selected_control_chart=ACCEPTANCE_SAMPLE, _education_acceptance_data=raw)
     elif extended:
         state.update(selected_columns=['외경'], measurement_date_column='부분군', n=EXTENDED_SAMPLE_N,
                      baseline_subgroups=EXTENDED_SAMPLE_BASELINE, chart_usage_mode=EXTENDED_MODE,

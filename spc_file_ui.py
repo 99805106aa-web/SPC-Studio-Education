@@ -37,7 +37,8 @@ def invalidate_analysis(state):
             job['cancel'].set()
     state.update(analysis_done=False, results=[], summary_df=None, ai_var_cache={},
                  _trigger_analysis=False)
-    for key in ('_distribution_jobs', '_preflight_cached', '_displayed_signature', '_analysis_request'):
+    for key in ('_distribution_jobs', '_preflight_cached', '_displayed_signature', '_analysis_request',
+                '_acceptance_result'):
         state.pop(key, None)
 
 

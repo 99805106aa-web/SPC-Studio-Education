@@ -4,12 +4,15 @@ from typing import NamedTuple
 
 import streamlit as st
 
+from spc_acceptance_ui import render_acceptance_tutorial
+from spc_education import ACCEPTANCE_SAMPLE, acceptance_sample_error, acceptance_sample_loaded, load_sample
 from spc_extended import EXTENDED_MODE
 from spc_file_ui import invalidate_analysis
 
 
 IMR_WIDE_GUIDANCE = ('현재 파일은 한 행을 부분군으로 사용합니다. I–MR을 사용하려면 시간순 개별 측정값 한 열을 '
                      '준비하고 사이드바에서 데이터 구조를 세로형으로 지정하세요.')
+ACCEPTANCE_TITLE = '합격판정 관리도'
 
 
 # Each entry gives the display name, allowed group sizes, use case, inputs and plotted values.
@@ -82,10 +85,21 @@ VARIABLE_PRACTICE = {
 }
 
 VARIABLE_NOTES = {
-    "imr": "이동범위는 원본에서 서로 인접한 유효 관측값으로 계산합니다. 결측으로 끊긴 구간을 연결하지 않습니다.",
-    "xbar_r": "범위는 두 극단값의 차이입니다. n=5에서는 같은 자료의 R과 S를 각각 그려 산포를 보는 방법을 비교할 수 있습니다.",
-    "xbar_s": "S는 부분군의 모든 값을 사용합니다. S 관리도에서 산포가 안정적인지 확인한 뒤 X̄ 관리도의 평균 이동을 해석합니다.",
-    EXTENDED_MODE: "기준구간에서 예상 평균 범위를 정하고 감시구간에서 적용합니다. 녹색 예상 범위와 실제 관리한계는 각각의 경계로 표시됩니다.",
+    "imr": "I에서 개별 값의 수준을 보고, MR에서 한 측정에서 다음 측정으로 값이 얼마나 달라졌는지 봅니다. 결측이 있으면 그 앞뒤를 연결해 MR을 계산하지 않습니다.",
+    "xbar_r": "R부터 확인합니다. R이 상한을 넘으면 그 묶음에서 최댓값과 최솟값의 차이가 유난히 큰 이유를 살펴봅니다. R이 안정적이면 X̄에서 평균의 이동을 봅니다.",
+    "xbar_s": "S부터 확인합니다. S가 상한을 넘으면 같은 부분군 안의 측정값이 평소보다 넓게 퍼진 원인을 확인합니다. S가 안정적이면 X̄에서 평균의 이동을 봅니다.",
+    EXTENDED_MODE: "S에서 산포의 안정성을 먼저 확인합니다. 위쪽 X̄의 녹색 띠는 예상 평균 범위입니다. 개입 신호는 확장 관리한계를 기준으로 봅니다.",
+}
+
+GUIDE_EXAMPLES = {
+    "imr": "한 시간에 제품 하나씩 측정해 10.0 mm와 10.3 mm가 나왔다면, I에는 두 값이 각각 찍히고 MR에는 두 값의 차이인 0.3 mm가 찍힙니다.",
+    "xbar_r": "한 시점에 측정한 5개가 9, 9, 10, 11, 11 mm라면, X̄에는 평균 10 mm, R에는 범위 2 mm가 찍힙니다.",
+    "xbar_s": "같은 5개 값 9, 9, 10, 11, 11 mm에서 X̄는 10 mm, S는 1 mm입니다. S 계산에는 5개 값이 모두 들어갑니다.",
+    EXTENDED_MODE: "공구가 마모될수록 직경이 조금씩 커지고 교체하면 작아지는 패턴이 반복됩니다. 기준구간에서 그 이동 범위를 정하고 이후 평균을 감시합니다.",
+    "p": "100개 중 5개가 불량이면 5%, 200개 중 5개가 불량이면 2.5%가 찍힙니다.",
+    "np": "매일 100개씩 검사해서 첫날 5개, 다음 날 2개가 불량이면 그래프에 5와 2가 찍힙니다.",
+    "c": "같은 면적 2㎡의 판재 두 장에서 흠집이 각각 3개, 5개라면 그래프에 3과 5가 찍힙니다.",
+    "u": "1㎡에서 흠집이 3개, 2㎡에서 4개라면 그래프에는 각각 3개/㎡와 2개/㎡가 찍힙니다.",
 }
 
 TUTORIAL_QUESTIONS = {
@@ -98,9 +112,21 @@ TUTORIAL_QUESTIONS = {
     'subgroup_distribution': ('부분군 평균의 분포는 어떤가요?',
                               '개별값과 부분군 평균의 분포는 다를 수 있습니다. 위치 관리도에 타점할 부분군 평균의 형태를 기준으로 답하세요.',
                               (('정규에 가깝거나 아직 미확인', 'shift'), ('비대칭·비정규가 의심됨', 'pearson'))),
-    'shift': ('예상되는 평균 이동을 관리한계에 반영하나요?',
-              '공구 마모처럼 반복되는 이동 범위를 미리 확인했고, 부분군 내 산포가 안정적일 때 확장 슈하르트를 고려합니다.',
-              (('일반적인 평균 변화를 감시', 'dispersion'), ('확인된 반복 이동 범위를 반영', EXTENDED_MODE))),
+    'shift': ('공정 평균을 어떤 기준으로 관리하나요?',
+              '공구 마모처럼 평균 이동이 예상된다면, 과거에 확인한 이동 범위를 감시할지 '
+              '제품 규격과 허용 부적합률로 개입 시점을 정할지 선택하세요.',
+              (('일반적인 평균 변화를 감시', 'dispersion'),
+               ('확인된 반복 이동 범위를 반영', EXTENDED_MODE),
+               ('규격과 허용 부적합률로 개입 시점을 판단', 'acceptance_conditions'))),
+    'acceptance_conditions': (
+        '합격판정 관리도의 적용 조건을 모두 확인했나요?',
+        '고객 요구사항에 따라 경계별 허용 부적합률을 정할 수 있고, 예상되는 평균 이동을 허용할 수 있어야 합니다. '
+        '고객이 해당 특성에 무결점을 요구하면 합격판정 관리도를 적용할 수 없습니다. '
+        '군내 산포가 안정적이고 공정능력이 충분히 높은지 확인하세요. 매뉴얼은 군내 표준편차가 공차 폭의 '
+        '1/10 미만인 경우를 일반적인 조건으로 제시하며, 이 앱의 X̄ 방식은 정규분포를 가정합니다.',
+        (('적용 조건을 모두 확인함', 'acceptance'),
+         ('무결점 요구, 조건 미충족 또는 미확인', 'acceptance_review')),
+    ),
     'dispersion': ('부분군 내 변동을 어떻게 보고 싶나요?',
                    'R은 최댓값과 최솟값의 차이이고, S는 모든 측정값으로 계산한 표본표준편차입니다.',
                    (('최댓값과 최솟값의 차이로 보기', 'xbar_r'), ('표준편차로 보기', 'xbar_s'))),
@@ -360,6 +386,19 @@ def _render_tutorial(attribute, selected, ready, frame):
     with st.container(border=True):
         if step == 'pearson':
             _render_pearson_recommendation(planned_n, ready, frame)
+        elif step == 'acceptance':
+            st.success(f'추천 관리도 · {ACCEPTANCE_TITLE}')
+            st.write('S 또는 R 관리도로 군내 산포를 감시하고, X̄ 합격판정 관리도에서 제품 규격과 '
+                     '허용 부적합률로 계산한 판정한계에 부분군 평균을 비교합니다.')
+            st.button('합격판정 예제 불러오기', key='guide_tutorial_acceptance_practice',
+                      on_click=load_sample, args=(ACCEPTANCE_SAMPLE,))
+            st.caption('공구 마모 예제를 불러온 뒤 분석을 시작하세요. 결과 화면에서 허용 부적합률과 개입 확률을 바꿀 수 있습니다.')
+            _render_tutorial_run(False, acceptance_sample_loaded(state), ready)
+        elif step == 'acceptance_review':
+            st.info('무결점 요구 특성은 일반 관리도로 공정 변화를 감시하고, 고객과 합의한 검사·출하 기준으로 '
+                    '제품 적합 여부를 판단하세요. 적용 조건이 미확인이라면 군내 산포와 공정능력, 허용 부적합률을 먼저 확인하세요.')
+            st.button('일반 관리도 선택 계속', key='guide_tutorial_acceptance_other',
+                      on_click=_tutorial_move, args=(path_key, 'dispersion' if planned_n < 10 else 'xbar_s'))
         elif step in charts:
             _render_tutorial_recommendation(step, attribute, selected, planned_n, ready)
         elif step == 'group_size':
@@ -439,6 +478,8 @@ def _imr_layout_blocked(chart, state):
 
 
 def chart_selection_error(state):
+    if acceptance_sample_loaded(state):
+        return acceptance_sample_error(state)
     selected = state.get("selected_control_chart")
     if selected not in CHARTS:
         return ""
@@ -493,6 +534,8 @@ def _select_chart(selected, *, subgroup_size=None):
 
 
 def chart_selection_label(state):
+    if acceptance_sample_loaded(state):
+        return ACCEPTANCE_TITLE
     if state.get('_guide_pearson_requested'):
         if any(item.get('distribution_mode') == 'nonnormal' for item in state.get('results', [])):
             return "피어슨 관리도 · 적용 변수 있음"
@@ -503,6 +546,28 @@ def chart_selection_label(state):
     if state.get("chart_usage_mode") == EXTENDED_MODE:
         return f"{CHARTS[EXTENDED_MODE][0]} (운영 모드)"
     return "자동 선택"
+
+
+def _render_chart_details(use_case, inputs, read, example):
+    st.markdown(
+        f'**언제 쓰나요?** {use_case}\n\n'
+        f'**무엇을 준비하나요?** {inputs}\n\n'
+        f'**그래프를 어떻게 읽나요?** {read}\n\n'
+        f'**간단한 예** · {example}'
+    )
+
+
+def _render_pearson_details():
+    _render_chart_details(
+        '개별값이나 부분군 평균이 한쪽으로 치우쳐 일반적인 정규분포 기준으로 해석하기 어려울 때 검토합니다.',
+        '한 번에 하나씩 측정하면 시간순 개별값을, 여러 개씩 측정하면 같은 조건에서 함께 잰 값을 부분군으로 준비합니다.',
+        '선택한 분포의 양쪽 끝 확률을 기준으로 위치 관리한계를 계산합니다. 분포가 비대칭이면 중심에서 위·아래 한계까지의 거리가 '
+        '서로 다를 수 있습니다. 진단 화면에서 자료의 모양과 후보 분포를 비교한 뒤 적용하세요.',
+        '평면도 편차는 0 아래로 내려갈 수 없고 큰 값 쪽으로 길게 늘어질 수 있습니다. 평면도 예제로 한계가 어떻게 달라지는지 확인합니다.',
+    )
+    st.button('피어슨 예제 불러오기', key='guide_pearson_details_sample', on_click=_prepare_pearson,
+              args=('imr', 1), kwargs={'use_example': True})
+    st.caption('예제를 불러온 뒤 분석 시작 → 관리도 → 후보 분포 진단 시작 순서로 진행하세요.')
 
 
 def render_chart_guide(selection_error="", *, attribute_ready=False, frame=None):
@@ -524,7 +589,7 @@ def render_chart_guide(selection_error="", *, attribute_ready=False, frame=None)
              format_func={"variable": "계량형 · 길이·중량 등 측정값",
                           "attribute": "계수형 · 불량품 수·결점 수"}.get,
              horizontal=True, on_change=_change_analysis_kind)
-    guide, details = st.tabs(["선택 가이드", "관리도별 안내"])
+    guide, details = st.tabs(['선택 가이드', '관리도별 안내'])
     with guide:
         ready = attribute_ready if attribute else bool(state.get('data_bytes')) and not selection_error
         _render_tutorial(attribute, selected, ready, frame)
@@ -534,26 +599,33 @@ def render_chart_guide(selection_error="", *, attribute_ready=False, frame=None)
                 st.caption('확장 슈하르트는 원단위 자료로 계산합니다. 저장한 피어슨 설정은 피어슨 분석에 사용됩니다.')
         _render_practice(attribute)
     with details:
+        st.caption('가로축은 측정 또는 검사 순서입니다. 점이 관리한계를 벗어나면 그 시점의 공정 조건이나 검사 기록을 확인하세요.')
         if attribute:
+            st.write('**불량품은 제품을, 결점은 흠집 같은 개별 이상을 셉니다.** 흠집 3개가 있는 불량품 한 개는 불량품 1개이자 결점 3개입니다.')
             for chart_id, chart in ATTRIBUTE_CHARTS.items():
                 with st.expander(chart.name, expanded=selected == chart_id):
-                    st.markdown(f"**사용 상황**  \n{chart.use_case}")
-                    st.markdown(f"**데이터 준비**  \n{chart.inputs}")
-                    st.markdown(f"**관리도 읽기**  \n{chart.interpretation}")
+                    _render_chart_details(chart.use_case, chart.inputs, chart.interpretation,
+                                          GUIDE_EXAMPLES[chart_id])
                     st.button(f"{chart.name} · 선택됨" if selected == chart_id else f"{chart.name} 선택",
                               key=f'guide_{chart_id}', on_click=_select_attribute_chart, args=(chart_id,))
         else:
-            for chart_id, (name, _, use_case, inputs, plots) in CHARTS.items():
+            st.write('**부분군**은 같은 시점과 조건에서 함께 잰 값의 묶음입니다. **X̄**는 그 묶음의 평균이고, '
+                     '**산포**는 측정값이 서로 얼마나 퍼져 있는지를 뜻합니다.')
+            for chart_id, (name, _, use_case, inputs, _) in CHARTS.items():
                 with st.expander(name, expanded=selected == chart_id):
-                    st.markdown(f"**사용 상황**  \n{use_case}")
-                    st.markdown(f"**데이터 준비**  \n{inputs}")
-                    st.markdown(f"**확인할 변화**  \n{plots}")
-                    st.markdown(f"**관리도 읽기**  \n{VARIABLE_NOTES[chart_id]}")
+                    _render_chart_details(use_case, inputs, VARIABLE_NOTES[chart_id], GUIDE_EXAMPLES[chart_id])
                     imr_blocked = _imr_layout_blocked(chart_id, state)
                     st.button(f"{name} · 선택됨" if selected == chart_id else f"{name} 선택",
                               key=f'guide_{chart_id}', on_click=_select_chart, args=(chart_id,), disabled=imr_blocked)
                     if imr_blocked:
                         st.caption(IMR_WIDE_GUIDANCE)
+            with st.expander('피어슨 관리도', expanded=bool(state.get('_guide_pearson_requested'))):
+                _render_pearson_details()
+            with st.expander(ACCEPTANCE_TITLE, expanded=acceptance_sample_loaded(state)):
+                render_acceptance_tutorial()
+                st.button('합격판정 예제 불러오기', key='guide_acceptance_sample_load',
+                          on_click=load_sample, args=(ACCEPTANCE_SAMPLE,))
+                st.caption('예제를 불러온 뒤 사이드바에서 분석 시작을 누르세요.')
         if selected:
             st.caption("왼쪽에서 파일을 올리고 계수와 검사수 또는 검사단위 열을 확인하세요." if attribute
                        else "왼쪽에서 측정 파일을 올리고 부분군 크기와 측정 열을 확인한 뒤 분석을 시작하세요.")

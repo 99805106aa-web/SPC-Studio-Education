@@ -1033,10 +1033,11 @@ from spc_mode_ui import (preserve_settings, beginner_inputs, beginner_conditions
                          quick_results, paged_window, show_scrollable_interactive_chart)
 from spc_metric_ui import process_metric_cards_html, STATUS_CELL_STYLES
 from spc_distribution_ui import render_distribution_panel
+from spc_acceptance_ui import read_acceptance_measurements, render_acceptance_results
 from spc_extended_ui import render_extended, with_extended_results
 from spc_extended import EXTENDED_MODE, TITLE as EXTENDED_TITLE, display_panels, monitor_counts, monitor_signals, unsupported_reason
 from spc_chart_guide import chart_selection_error, chart_selection_label, render_chart_guide, render_studio_header
-from spc_education import render_ocap_exercise, render_samples
+from spc_education import acceptance_sample_loaded, render_ocap_exercise, render_samples
 
 from spc_export import (
     export_summary_excel, export_all_pdf, export_analysis_html, publish_analysis_html, html_bytes_to_pdf, fig_to_bytes,
@@ -3644,12 +3645,24 @@ with st.sidebar:
 
 
 # ─────────────────────────── 분석 실행 ───────────────────────────
+_acceptance_active = acceptance_sample_loaded(st.session_state)
+if not _acceptance_active or _chart_selection_error:
+    st.session_state.pop('_acceptance_result', None)
 _auto_triggered = st.session_state.pop('_trigger_analysis', False)
 _watch_file_changed = st.session_state.pop('_watch_file_changed', False)
 _refresh_normal_start = st.session_state.pop('_refresh_normal_start', False)
 if run_btn or _auto_triggered or _watch_file_changed or _refresh_normal_start:
     if _chart_selection_error:
         st.error(_chart_selection_error)
+    elif _acceptance_active:
+        if run_btn or _auto_triggered:
+            with st.spinner('분석 중...'):
+                try:
+                    st.session_state['_acceptance_result'] = read_acceptance_measurements(
+                        st.session_state['data_bytes'], st.session_state['data_sheet'])
+                except (KeyError, ValueError) as e:
+                    st.session_state.pop('_acceptance_result', None)
+                    st.error(f'분석 실패: {e}')
     elif not st.session_state.get('data_bytes'):
         st.error("데이터 파일을 먼저 업로드하세요.")
     elif (
@@ -3778,9 +3791,15 @@ if (
 
 render_studio_header()
 
-if not st.session_state['analysis_done'] or _chart_guide_slot.toggle("관리도 선택 가이드 열기", key="_show_chart_guide"):
+_acceptance_result = st.session_state.get('_acceptance_result')
+if (not (st.session_state['analysis_done'] or _acceptance_result is not None)
+        or _chart_guide_slot.toggle("관리도 선택 가이드 열기", key="_show_chart_guide")):
     render_chart_guide(_chart_selection_error, frame=_df_layout)
     st.divider()
+
+if _acceptance_result is not None:
+    render_acceptance_results(_acceptance_result, st.session_state['palette'])
+    st.stop()
 
 # ── 상태바 (분석 완료 시) ──
 _extended_result = any(it.get('chart_usage_mode') == EXTENDED_MODE for it in st.session_state.get('results', []))

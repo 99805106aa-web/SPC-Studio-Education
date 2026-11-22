@@ -173,6 +173,11 @@ def get_control_constants(n: int) -> Tuple[float, float, float, float]:
     return A2, D3, D4, d2
 
 
+def s_chart_probability_limits(sigma: float, n: int, tail: float) -> Tuple[float, float]:
+    lower, upper = sigma * np.sqrt(stats.chi2.ppf([tail, 1 - tail], n - 1) / (n - 1))
+    return float(lower), float(upper)
+
+
 def get_s_chart_constants(n: int) -> Tuple[float, float, float, float]:
     """
     n에 대한 Xbar-S 관리계수 (A3, B3, B4, c4) 반환.
@@ -987,7 +992,7 @@ def analyze_column(
             z_limit = float(stats.norm.ppf(1-tail))
             ucl = xbarbar + z_limit*sigma_within/np.sqrt(n)
             lcl = xbarbar - z_limit*sigma_within/np.sqrt(n)
-            r_lcl, r_ucl = (sigma_within*np.sqrt(stats.chi2.ppf([tail,1-tail], n-1)/(n-1))).tolist()
+            r_lcl, r_ucl = s_chart_probability_limits(sigma_within, n, tail)
 
             A2_plot = np.nan
             D3_val = np.nan
